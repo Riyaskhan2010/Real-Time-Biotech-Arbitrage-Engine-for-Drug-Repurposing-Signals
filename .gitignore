@@ -1,0 +1,70 @@
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+*.egg
+
+# ─── Database (generated — not source code) ──────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Environment / Secrets — NEVER commit real credentials ───────────────────
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+# .env.example IS committed — it contains only placeholders
+
+# ─── Build output ─────────────────────────────────────────────────────────────
+dist/
+build/
+.next/
+.nuxt/
+frontend/dist/
+frontend/build/
+frontend/build_output.txt
+
+# ─── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+.npm/
+.yarn/
+
+# ─── IDE ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Coverage ────────────────────────────────────────────────────────────────
+.coverage
+htmlcov/
+coverage.xml
+
+# ─── Misc ────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.orig
