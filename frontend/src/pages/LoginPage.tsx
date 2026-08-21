@@ -183,7 +183,14 @@ export function LoginPage() {
             </div>
           </div>
 
-          <p className="mt-5 text-center text-[11px] text-slate-400 leading-relaxed">
+          <p className="mt-4 text-center text-[12px] text-slate-500">
+            Don&apos;t have an account?{' '}
+            <Link to="/register" className="font-semibold text-navy-700 hover:underline">
+              Create Account
+            </Link>
+          </p>
+
+          <p className="mt-3 text-center text-[11px] text-slate-400 leading-relaxed">
             For qualified biomedical researchers only.
             Not for clinical use or treatment decisions.
           </p>

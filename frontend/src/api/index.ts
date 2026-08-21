@@ -1,6 +1,6 @@
 import client from './client'
 import type {
-  AuthToken, DashboardData, Signal, SignalListItem,
+  AuthToken, User, DashboardData, Signal, SignalListItem,
   Drug, Disease, Evidence, Alert, SignalExplanation,
 } from '../types'
 
@@ -18,6 +18,16 @@ export const authApi = {
   },
   me: async () => {
     const { data } = await client.get('/auth/me')
+    return data
+  },
+  register: async (payload: {
+    full_name: string
+    email: string
+    username: string
+    password: string
+    institution?: string
+  }): Promise<User> => {
+    const { data } = await client.post<User>('/auth/register', payload)
     return data
   },
 }
