@@ -369,6 +369,7 @@ export function LandingPage() {
   const [sourcesCount, setSourcesCount] = useState<number | null>(null)
   const [dbCount,      setDbCount]      = useState<number>(7)
   const [highConf,     setHighConf]     = useState<number | null>(null)
+  const [hasLiveData,  setHasLiveData]  = useState<boolean | null>(null)
   const [statsLoading, setStatsLoading] = useState(true)
   const [mobileOpen,   setMobileOpen]   = useState(false)
   const [scrolled,     setScrolled]     = useState(false)
@@ -390,6 +391,7 @@ export function LandingPage() {
         setSourcesCount(s.sources_indexed)
         setDbCount(s.configured_databases)
         setHighConf(s.high_confidence)
+        setHasLiveData(s.has_live_data)
       })
       .catch(() => {
         // Backend unavailable — values stay null → rendered as '—'
@@ -565,6 +567,9 @@ export function LandingPage() {
                       <Icon size={12} className="text-white/40" />
                       {statsLoading ? (
                         <span className="text-sm text-white/35 font-medium">…</span>
+                      ) : hasLiveData === false ? (
+                        // Ingestion pending — data will populate after startup ingestion completes
+                        <p className="text-sm text-white/35 font-medium">…</p>
                       ) : (
                         <p className="text-xl font-bold text-white tabular-nums">
                           {v != null ? v.toLocaleString() : '—'}

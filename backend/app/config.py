@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
+    # Database URL.
+    # - Development (local):  sqlite:///./bioarbitrage.db  (next to main.py)
+    # - Production (Render):  sqlite:////data/bioarbitrage.db  (persistent disk)
+    # The render.yaml sets DATABASE_URL=sqlite:////data/bioarbitrage.db via env var.
+    # This default is only used when DATABASE_URL is not set in the environment.
     DATABASE_URL: str = "sqlite:///./bioarbitrage.db"
 
     OPENAI_API_KEY: str = ""

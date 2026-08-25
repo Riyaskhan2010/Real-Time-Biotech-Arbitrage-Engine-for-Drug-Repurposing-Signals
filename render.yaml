@@ -6,8 +6,35 @@ services:
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # Persistent disk — survives redeploys and restarts.
+    # SQLite database is stored here so real ingested data is never lost.
+    # Free-tier Render: use the smallest available disk (1 GB is sufficient).
+    disk:
+      name: bioarbitrage-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: "3.11.9"
       - key: APP_ENV
         value: production
+      # Persistent SQLite path on the mounted disk.
+      # Set this in Render Dashboard → Environment if you need to override.
+      - key: DATABASE_URL
+        value: sqlite:////data/bioarbitrage.db
+      # Required — set a strong random value in Render Dashboard → Environment
+      # Example: openssl rand -hex 32
+      - key: SECRET_KEY
+        sync: false   # tells Render this must be set manually — never auto-generated
+      # Optional — increases PubMed API rate limit from 3 to 10 req/s
+      # Get a free key at https://www.ncbi.nlm.nih.gov/account/
+      - key: NCBI_API_KEY
+        sync: false
+      # Optional — required for Elsevier/Scopus source
+      # Get a key at https://dev.elsevier.com/
+      - key: ELSEVIER_API_KEY
+        sync: false
+      # Set to your frontend Render URL after frontend deploys
+      # Example: https://real-time-biotech-arbitrage-engine-for-1mow.onrender.com
+      - key: ALLOWED_ORIGINS
+        sync: false

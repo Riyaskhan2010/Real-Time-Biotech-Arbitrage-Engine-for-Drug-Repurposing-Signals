@@ -51,6 +51,8 @@ export interface PublicStats {
   drugs_monitored:      number
   diseases_tracked:     number
   live_evidence:        number
+  /** True when at least one real ingestion has run. False = startup/pending state. */
+  has_live_data:        boolean
 }
 
 export const publicApi = {
