@@ -1,4 +1,4 @@
-# Core framework — pinned to tested versions
+# Core framework
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 
@@ -6,9 +6,9 @@ uvicorn[standard]==0.29.0
 sqlalchemy==2.0.30
 alembic==1.13.1
 
-# Pydantic — pinned together (core must match)
+# Pydantic — pydantic-core version must match pydantic exactly
 pydantic==2.7.1
-pydantic-core==2.18.4
+pydantic-core==2.18.2
 pydantic-settings==2.2.1
 
 # Auth
@@ -21,11 +21,11 @@ python-multipart==0.0.9
 python-dotenv==1.0.1
 httpx==0.27.0
 
-# OpenAI — pin to v1.x (v3 is a different/older package)
+# OpenAI v1.x (NOT v3 — different package)
 openai==1.30.1
 
 # Async file handling
 aiofiles==23.2.1
 
-# Email validation (needed by fastapi)
+# Email validation (required by fastapi)
 email-validator==2.1.1
