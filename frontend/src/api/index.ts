@@ -41,6 +41,25 @@ export const dashboardApi = {
   },
 }
 
+// ── Public Statistics (no auth required) ──────────────────────────────────────
+
+export interface PublicStats {
+  total_signals:        number
+  high_confidence:      number
+  sources_indexed:      number
+  configured_databases: number
+  drugs_monitored:      number
+  diseases_tracked:     number
+  live_evidence:        number
+}
+
+export const publicApi = {
+  stats: async (): Promise<PublicStats> => {
+    const { data } = await client.get<PublicStats>('/public/stats')
+    return data
+  },
+}
+
 // ── Signals ───────────────────────────────────────────────────────────────────
 
 export const signalsApi = {

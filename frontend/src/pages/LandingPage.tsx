@@ -14,9 +14,16 @@ import {
   ChevronDown, Menu, X, Award, TrendingUp,
   Dna, Network, GitMerge, Target, Microscope,
   Atom,
+  // Developer section icons
+  User as UserIcon,
+  Mail as MailIcon,
+  GraduationCap as SchoolIcon,
+  Phone as PhoneIcon,
+  Linkedin as LinkedinIcon,
+  Github as GithubIcon,
 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
-import { dashboardApi, signalsApi } from '../api'
+import { publicApi, signalsApi } from '../api'
 import type { SignalListItem } from '../types'
 
 // ─── Color constants ─────────────────────────────────────────────────────────
@@ -360,7 +367,9 @@ export function LandingPage() {
   const [signals,      setSignals]      = useState<SignalListItem[]>([])
   const [totalSignals, setTotalSignals] = useState<number | null>(null)
   const [sourcesCount, setSourcesCount] = useState<number | null>(null)
+  const [dbCount,      setDbCount]      = useState<number>(7)
   const [highConf,     setHighConf]     = useState<number | null>(null)
+  const [statsLoading, setStatsLoading] = useState(true)
   const [mobileOpen,   setMobileOpen]   = useState(false)
   const [scrolled,     setScrolled]     = useState(false)
 
@@ -372,11 +381,21 @@ export function LandingPage() {
 
   // Silent API calls — page never redirects or crashes on failure
   useEffect(() => {
-    dashboardApi.get().then(d => {
-      setTotalSignals(d.stats.total_signals)
-      setSourcesCount(d.stats.total_research_sources)
-      setHighConf(d.stats.high_confidence_signals)
-    }).catch(() => {})
+    // Use the public (no-auth) stats endpoint so unauthenticated visitors
+    // see real numbers instead of '—' (the dashboard endpoint requires a token)
+    setStatsLoading(true)
+    publicApi.stats()
+      .then(s => {
+        setTotalSignals(s.total_signals)
+        setSourcesCount(s.sources_indexed)
+        setDbCount(s.configured_databases)
+        setHighConf(s.high_confidence)
+      })
+      .catch(() => {
+        // Backend unavailable — values stay null → rendered as '—'
+        // Page stays visible
+      })
+      .finally(() => setStatsLoading(false))
 
     signalsApi.list({ limit: 6, include_demo: false, sort_by: 'evidence_score' })
       .then(setSignals).catch(() => {})
@@ -532,13 +551,19 @@ export function LandingPage() {
                 {[
                   { v: totalSignals, label:'Research Signals',     icon: TrendingUp },
                   { v: sourcesCount, label:'Sources Indexed',      icon: Database   },
-                  { v: 7,            label:'Biomedical Databases', icon: Network    },
+                  { v: dbCount,      label:'Biomedical Databases', icon: Network    },
                   { v: highConf,     label:'High-Confidence',      icon: Shield     },
                 ].map(({ v, label, icon: Icon }) => (
                   <div key={label} className="text-center">
                     <div className="flex items-center justify-center gap-1.5 mb-0.5">
                       <Icon size={12} className="text-white/40" />
-                      <p className="text-xl font-bold text-white tabular-nums">{v != null ? v.toLocaleString() : '—'}</p>
+                      {statsLoading ? (
+                        <span className="text-sm text-white/35 font-medium">…</span>
+                      ) : (
+                        <p className="text-xl font-bold text-white tabular-nums">
+                          {v != null ? v.toLocaleString() : '—'}
+                        </p>
+                      )}
                     </div>
                     <p className="text-[11px] text-white/45">{label}</p>
                   </div>
@@ -870,32 +895,245 @@ export function LandingPage() {
         </div>
       </section>
 
-      {/* FOOTER */}
-      <footer style={{ background: NAVY_DARK }} className="text-white py-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6 mb-6">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center">
-                <FlaskConical size={15} className="text-white" />
-              </div>
-              <div>
-                <p className="text-[13px] font-bold">BioArbitrage</p>
-                <p className="text-[10px] text-white/35">Real-Time Drug Repurposing Intelligence</p>
-              </div>
+      {/* DEVELOPER SECTION */}
+      <section id="developer" className="py-16 lg:py-24 bg-slate-50 border-t border-slate-200">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6">
+
+          {/* Section heading */}
+          <div className="text-center mb-12">
+            <div className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full border mb-4"
+              style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', color: '#1D4ED8' }}>
+              <UserIcon size={10} /> Core Developer
             </div>
-            <div className="flex flex-wrap items-center gap-5 text-[12px] text-white/40">
-              {NAV_LINKS.map(({ id, label }) => (
-                <button key={id} onClick={() => scrollTo(id)} className="hover:text-white/70 transition-colors">{label}</button>
-              ))}
-              <Link to="/register" className="hover:text-white/70 transition-colors">Register</Link>
-              <button onClick={handleExploreCTA} className="hover:text-white/70 transition-colors">Dashboard</button>
-            </div>
-            <button onClick={handleExploreCTA}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-white rounded-md border border-white/15 bg-white/8 hover:bg-white/15 transition-colors">
-              {isAuthenticated ? 'Open Dashboard' : 'Sign In'} <ArrowRight size={13} />
-            </button>
+            <h2 className="text-2xl sm:text-3xl font-bold mb-3" style={{ color: NAVY }}>
+              Meet the Developer
+            </h2>
+            <p className="text-slate-500 text-sm max-w-xl mx-auto">
+              BioArbitrage is a hackathon / innovation project built end-to-end by a single developer.
+            </p>
           </div>
-          <div className="pt-5 border-t border-white/8 flex flex-col md:flex-row items-center justify-between gap-2 text-[11px] text-white/25">
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+
+            {/* ── Profile card ─────────────────────────────────────────────── */}
+            <div className="lg:col-span-1">
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center shadow-card hover:shadow-card-md transition-shadow">
+                {/* Avatar — real photo */}
+                <div className="w-24 h-24 rounded-full mx-auto mb-4 overflow-hidden border-3 border-white shadow-lg ring-2 ring-blue-200">
+                  <img
+                    src="/developer.jpg"
+                    alt="Mohamed Riyaskhan S"
+                    className="w-full h-full object-cover object-top"
+                  />
+                </div>
+
+                <h3 className="text-lg font-bold mb-0.5" style={{ color: NAVY }}>Mohamed Riyaskhan S</h3>
+                <p className="text-[13px] font-semibold text-blue-600 mb-1">Core Developer</p>
+                <p className="text-[12px] text-slate-500 mb-4">Full-Stack Development &amp; AI</p>
+
+                {/* Project pill */}
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg mb-5 w-full justify-center"
+                  style={{ background: `${NAVY}0f`, border: `1px solid ${NAVY}20` }}>
+                  <FlaskConical size={13} style={{ color: NAVY }} />
+                  <div className="text-left">
+                    <p className="text-[11px] font-bold" style={{ color: NAVY }}>BioArbitrage</p>
+                    <p className="text-[10px] text-slate-500 leading-tight">Hackathon / Innovation Project</p>
+                  </div>
+                </div>
+
+                {/* Contact buttons */}
+                <div className="space-y-2">
+                  <a href="mailto:mriyaskhan254@gmail.com"
+                    className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg text-[12px] font-medium text-white transition-all hover:opacity-90 hover:scale-[1.02]"
+                    style={{ background: '#EA4335' }}>
+                    <MailIcon size={14} />
+                    <span>mriyaskhan254@gmail.com</span>
+                  </a>
+                  <a href="mailto:mohamedriyaskhans.bit25@rathinam.in"
+                    className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg text-[12px] font-medium transition-all hover:opacity-90 hover:scale-[1.02]"
+                    style={{ background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE' }}>
+                    <SchoolIcon size={14} />
+                    <span className="truncate">mohamedriyaskhans.bit25@rathinam.in</span>
+                  </a>
+                  <a href="tel:+919150900577"
+                    className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg text-[12px] font-medium transition-all hover:opacity-90 hover:scale-[1.02]"
+                    style={{ background: '#F0FDF4', color: '#166534', border: '1px solid #BBF7D0' }}>
+                    <PhoneIcon size={14} />
+                    <span>+91 9150900577</span>
+                  </a>
+                  <a href="https://linkedin.com/in/mohamed-riyaskhan-s-9a5247386"
+                    target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg text-[12px] font-medium text-white transition-all hover:opacity-90 hover:scale-[1.02]"
+                    style={{ background: '#0A66C2' }}>
+                    <LinkedinIcon size={14} />
+                    <span>LinkedIn Profile</span>
+                  </a>
+                  <a href="https://github.com/Riyaskhan2010"
+                    target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg text-[12px] font-medium text-white transition-all hover:opacity-90 hover:scale-[1.02]"
+                    style={{ background: '#24292F' }}>
+                    <GithubIcon size={14} />
+                    <span>github.com/Riyaskhan2010</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Project + Contributions ───────────────────────────────────── */}
+            <div className="lg:col-span-2 space-y-6">
+
+              {/* Project philosophy */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-card">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center"
+                    style={{ background: `${NAVY}12`, border: `1px solid ${NAVY}25` }}>
+                    <FlaskConical size={17} style={{ color: NAVY }} />
+                  </div>
+                  <div>
+                    <p className="text-[13px] font-bold" style={{ color: NAVY }}>BioArbitrage</p>
+                    <p className="text-[11px] text-slate-500">Real-Time Biotech Arbitrage Engine for Drug Repurposing Signals</p>
+                  </div>
+                  <span className="ml-auto inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide"
+                    style={{ background: '#FEF3C7', color: '#92400E', border: '1px solid #FDE68A' }}>
+                    Hackathon Project
+                  </span>
+                </div>
+                <p className="text-[13px] text-slate-600 leading-relaxed">
+                  Built with a research-first approach, BioArbitrage combines multi-source biomedical evidence
+                  aggregation, cross-source deduplication, machine-learning–assisted signal detection and
+                  explainable evidence scoring to help researchers understand potential drug repurposing
+                  opportunities — while maintaining full source traceability.
+                </p>
+              </div>
+
+              {/* Contributions grid */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-card">
+                <h4 className="text-[14px] font-semibold mb-4" style={{ color: NAVY }}>My Contribution</h4>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: 'Full-Stack Development',         color: '#3B82F6' },
+                    { label: 'Backend API Development',        color: '#8B5CF6' },
+                    { label: 'Frontend Development',           color: '#06B6D4' },
+                    { label: 'AI / Machine Learning',          color: '#F59E0B' },
+                    { label: 'Data Pipeline Engineering',      color: '#10B981' },
+                    { label: 'Multi-Source Evidence Ingestion',color: '#EF4444' },
+                    { label: 'Drug Repurposing Signal Analysis',color: '#6366F1' },
+                    { label: 'Evidence Scoring',               color: '#F97316' },
+                    { label: 'Cross-Source Deduplication',     color: '#14B8A6' },
+                    { label: 'Dashboard Development',          color: '#8B5CF6' },
+                    { label: 'Database Integration',           color: '#64748B' },
+                    { label: 'Source Traceability',            color: '#10B981' },
+                    { label: 'REST API Integration',           color: '#3B82F6' },
+                    { label: 'UI/UX Implementation',           color: '#F59E0B' },
+                    { label: 'Authentication System',          color: '#EF4444' },
+                    { label: 'GitHub & Deployment',            color: '#24292F' },
+                  ].map(({ label, color }) => (
+                    <span key={label}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all hover:scale-105"
+                      style={{
+                        background: `${color}12`,
+                        borderColor: `${color}30`,
+                        color,
+                      }}>
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tech stack quick view */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-card">
+                <h4 className="text-[14px] font-semibold mb-4" style={{ color: NAVY }}>Technology Stack</h4>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { layer: 'Backend',    stack: 'FastAPI · Python · SQLite' },
+                    { layer: 'Frontend',   stack: 'React · TypeScript · Tailwind' },
+                    { layer: 'AI / ML',    stack: 'Heuristic scoring · Multi-factor evidence' },
+                    { layer: 'Sources',    stack: 'PubMed · EuropePMC · UniProt · 4 more' },
+                  ].map(({ layer, stack }) => (
+                    <div key={layer} className="rounded-xl p-3 text-center"
+                      style={{ background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">{layer}</p>
+                      <p className="text-[11px] text-slate-700 leading-snug">{stack}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <footer style={{ background: NAVY_DARK }} className="text-white py-12">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+
+            {/* Brand */}
+            <div>
+              <div className="flex items-center gap-2.5 mb-3">
+                <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center">
+                  <FlaskConical size={15} className="text-white" />
+                </div>
+                <div>
+                  <p className="text-[13px] font-bold">BioArbitrage</p>
+                  <p className="text-[10px] text-white/35">Real-Time Drug Repurposing Intelligence</p>
+                </div>
+              </div>
+              <p className="text-[11px] text-white/40 leading-relaxed max-w-xs">
+                Research decision-support platform for drug repurposing signal detection.
+                Not for clinical use, diagnosis, or treatment recommendations.
+              </p>
+            </div>
+
+            {/* Navigation */}
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Navigation</p>
+              <div className="space-y-1.5">
+                {[...NAV_LINKS, { id: 'developer', label: 'Developer' }].map(({ id, label }) => (
+                  <button key={id} onClick={() => scrollTo(id)}
+                    className="block text-[12px] text-white/45 hover:text-white/75 transition-colors text-left">
+                    {label}
+                  </button>
+                ))}
+                <Link to="/register" className="block text-[12px] text-white/45 hover:text-white/75 transition-colors">
+                  Register
+                </Link>
+                <button onClick={handleExploreCTA} className="block text-[12px] text-white/45 hover:text-white/75 transition-colors text-left">
+                  Open Dashboard
+                </button>
+              </div>
+            </div>
+
+            {/* Developer contact */}
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Core Developer</p>
+              <p className="text-[13px] font-semibold text-white mb-3">Mohamed Riyaskhan S</p>
+              <div className="space-y-2">
+                <a href="mailto:mriyaskhan254@gmail.com"
+                  className="flex items-center gap-2 text-[12px] text-white/45 hover:text-white/75 transition-colors">
+                  <MailIcon size={12} />mriyaskhan254@gmail.com
+                </a>
+                <a href="mailto:mohamedriyaskhans.bit25@rathinam.in"
+                  className="flex items-center gap-2 text-[12px] text-white/45 hover:text-white/75 transition-colors">
+                  <SchoolIcon size={12} />mohamedriyaskhans.bit25@rathinam.in
+                </a>
+                <a href="https://github.com/Riyaskhan2010" target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-[12px] text-white/45 hover:text-white/75 transition-colors">
+                  <GithubIcon size={12} />github.com/Riyaskhan2010
+                </a>
+                <a href="https://linkedin.com/in/mohamed-riyaskhan-s-9a5247386" target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-[12px] text-white/45 hover:text-white/75 transition-colors">
+                  <LinkedinIcon size={12} />LinkedIn Profile
+                </a>
+              </div>
+            </div>
+
+          </div>
+
+          <div className="pt-6 border-t border-white/8 flex flex-col md:flex-row items-center justify-between gap-2 text-[11px] text-white/25">
             <p>Research decision-support only. Not for clinical use, diagnosis, or treatment recommendations.</p>
             <p>Evidence sourced from publicly accessible biomedical databases via official APIs.</p>
           </div>

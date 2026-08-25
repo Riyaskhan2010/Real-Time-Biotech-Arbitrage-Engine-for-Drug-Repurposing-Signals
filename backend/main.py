@@ -16,6 +16,7 @@ from app.database import engine, Base
 from app.api import auth, dashboard, signals, drugs, diseases, evidence, alerts
 from app.api import research_monitor
 from app.api import ingestion
+from app.api import public as public_api
 
 
 @asynccontextmanager
@@ -102,6 +103,7 @@ app.include_router(evidence.router)
 app.include_router(alerts.router)
 app.include_router(research_monitor.router)
 app.include_router(ingestion.router)
+app.include_router(public_api.router)
 
 
 @app.get("/")
