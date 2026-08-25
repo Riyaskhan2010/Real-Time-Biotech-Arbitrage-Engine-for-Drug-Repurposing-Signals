@@ -1,7 +1,14 @@
 import axios from 'axios'
 
+// In development: Vite proxy sends /api → localhost:8000
+// In production (Render): VITE_API_BASE_URL points to the deployed backend
+//   e.g. https://bioarbitrage-backend.onrender.com
+const baseURL = import.meta.env.VITE_API_BASE_URL
+  ? `${import.meta.env.VITE_API_BASE_URL}/api`
+  : '/api'
+
 const client = axios.create({
-  baseURL: '/api',
+  baseURL,
   headers: { 'Content-Type': 'application/json' },
 })
 
@@ -26,10 +33,8 @@ client.interceptors.response.use(
       localStorage.removeItem('access_token')
       localStorage.removeItem('user')
       if (hadToken) {
-        // Session expired — send back to login
         window.location.href = '/login'
       }
-      // No token → unauthenticated request on a public/optional call → do nothing
     }
     return Promise.reject(err)
   }

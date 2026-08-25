@@ -1,9 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// In production (Render), VITE_API_URL env var points to the backend service.
+// In development, proxy to local backend at port 8000.
+const isDev = process.env.NODE_ENV !== 'production'
+
 export default defineConfig({
   plugins: [react()],
-  server: {
+  // Development proxy — only active with `npm run dev`
+  server: isDev ? {
     port: 5173,
     proxy: {
       '/api': {
@@ -11,20 +16,16 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
-  },
+  } : {},
   build: {
     chunkSizeWarningLimit: 800,
     rollupOptions: {
       output: {
         manualChunks: {
-          // Core React runtime
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          // Charts (largest dep)
+          'vendor-react':  ['react', 'react-dom', 'react-router-dom'],
           'vendor-charts': ['recharts'],
-          // Icons
-          'vendor-icons': ['lucide-react'],
-          // Utilities
-          'vendor-utils': ['axios', 'zustand', 'clsx', 'date-fns'],
+          'vendor-icons':  ['lucide-react'],
+          'vendor-utils':  ['axios', 'zustand', 'clsx', 'date-fns'],
         },
       },
     },
