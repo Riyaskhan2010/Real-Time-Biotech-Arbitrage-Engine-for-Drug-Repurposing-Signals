@@ -397,9 +397,15 @@ export function LandingPage() {
       })
       .finally(() => setStatsLoading(false))
 
-    signalsApi.list({ limit: 6, include_demo: false, sort_by: 'evidence_score' })
-      .then(setSignals).catch(() => {})
-  }, [])
+    // Only fetch signals when authenticated — the endpoint requires auth (401 otherwise).
+    // Unauthenticated visitors see the "Sign in to view" empty state, which is correct.
+    if (isAuthenticated) {
+      signalsApi.list({ limit: 6, include_demo: false, sort_by: 'evidence_score' })
+        .then(setSignals).catch(() => {})
+    } else {
+      setSignals([])
+    }
+  }, [isAuthenticated])
 
   // Smart CTA — goes to dashboard if logged in, login otherwise
   const handleExploreCTA = () => {

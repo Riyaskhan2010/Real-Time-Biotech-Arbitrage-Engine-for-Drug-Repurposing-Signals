@@ -162,20 +162,22 @@ def get_run_status(
     return run
 
 
-@router.get("/latest", response_model=IngestionRunStatus)
+@router.get("/latest", response_model=Optional[IngestionRunStatus])
 def get_latest_run(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Return the most recent ingestion run summary, or 404 if none exist."""
+    """
+    Return the most recent ingestion run summary.
+    Returns null (HTTP 200) when no runs exist yet — not 404.
+    This keeps Render logs clean while the frontend handles null gracefully.
+    """
     run = (
         db.query(IngestionRun)
         .order_by(IngestionRun.started_at.desc())
         .first()
     )
-    if not run:
-        raise HTTPException(status_code=404, detail="No ingestion runs found")
-    return run
+    return run  # None serialises as JSON null with 200
 
 
 @router.get("/source-status", response_model=List[SourceStatusItem])
