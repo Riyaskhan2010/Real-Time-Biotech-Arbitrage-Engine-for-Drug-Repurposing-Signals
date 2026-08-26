@@ -33,17 +33,25 @@ async def lifespan(app: FastAPI):
         print("[BioArbitrage] WARNING: ELSEVIER_API_KEY is not set — "
               "Elsevier/Scopus source will be disabled.")
 
-    # Auto-seed if database is empty (creates demo users, drugs, diseases, signals)
+    # Demo seeder — only in development, NEVER in production.
+    # Production must populate data through live ingestion only.
     from app.database import SessionLocal
     from app.models.user import User
     db = SessionLocal()
     try:
         user_count = db.query(User).count()
         if user_count == 0:
-            print("[BioArbitrage] Database is empty — running demo seeder...")
-            from app.data.seeder import seed_database
-            seed_database(db)
-            print("[BioArbitrage] Demo seed complete.")
+            if settings.APP_ENV == "production":
+                # Production: create the admin user only (no demo research data)
+                print("[BioArbitrage] Production: creating admin user (no demo seeding).")
+                from app.data.seeder import seed_users_only
+                seed_users_only(db)
+            else:
+                # Development: full demo seed for local testing
+                print("[BioArbitrage] Development: running full demo seeder...")
+                from app.data.seeder import seed_database
+                seed_database(db)
+                print("[BioArbitrage] Demo seed complete.")
     finally:
         db.close()
 

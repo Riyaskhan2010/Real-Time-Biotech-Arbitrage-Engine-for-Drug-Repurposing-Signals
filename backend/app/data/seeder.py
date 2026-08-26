@@ -197,3 +197,28 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+def seed_users_only(db: Session) -> None:
+    """
+    Production-safe seeder: creates only the user accounts needed to log in.
+    Does NOT create demo drugs, diseases, signals, evidence, sources, or alerts.
+    All research data comes from live ingestion.
+    """
+    print("[BioArbitrage] Creating production user accounts (no demo research data)...")
+    for u in DEMO_USERS:
+        existing = db.query(User).filter(User.email == u["email"]).first()
+        if not existing:
+            user = User(
+                email=u["email"],
+                username=u["username"],
+                full_name=u["full_name"],
+                hashed_password=get_password_hash(u["password"]),
+                role=u["role"],
+                institution=u["institution"],
+            )
+            db.add(user)
+    db.commit()
+    print("[BioArbitrage] Production user accounts created.")
+    print("  Login: researcher@bioarbitrage.demo / demo1234")
+    print("  Login: admin@bioarbitrage.demo / admin1234")

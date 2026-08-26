@@ -118,28 +118,47 @@ class _RxivConnector(BaseConnector):
         """
         Fetch one date-window, paginating through all cursor pages until
         we have enough relevant results or the window is exhausted.
+        Retries on RemoteProtocolError / ServerDisconnected (transient).
         """
         collected: List[NormalizedRecord] = []
         cursor = 0
+        max_retries = 3
 
         while len(collected) < need:
             url = f"{BIORXIV_BASE}/{self._SERVER}/{start}/{end}/{cursor}/json"
-            try:
-                r = await client.get(url)
-                r.raise_for_status()
-                data = r.json()
-            except httpx.TimeoutException:
-                logger.warning("[%s] timeout for window %s–%s cursor %d",
-                               self._SERVER, start, end, cursor)
-                break
-            except Exception as e:
-                logger.warning("[%s] error for window %s–%s cursor %d: %s",
-                               self._SERVER, start, end, cursor, e)
+            last_err = None
+
+            for attempt in range(max_retries):
+                try:
+                    r = await client.get(url)
+                    r.raise_for_status()
+                    data = r.json()
+                    last_err = None
+                    break
+                except httpx.TimeoutException:
+                    logger.warning("[%s] timeout %s–%s cursor %d (attempt %d/%d)",
+                                   self._SERVER, start, end, cursor, attempt + 1, max_retries)
+                    last_err = "timeout"
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                except httpx.RemoteProtocolError as e:
+                    logger.warning("[%s] RemoteProtocolError %s–%s cursor %d (attempt %d/%d): %s",
+                                   self._SERVER, start, end, cursor, attempt + 1, max_retries, e)
+                    last_err = "remote_protocol_error"
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                except Exception as e:
+                    logger.warning("[%s] error %s–%s cursor %d: %s",
+                                   self._SERVER, start, end, cursor, e)
+                    last_err = str(e)
+                    break
+
+            if last_err:
+                logger.warning("[%s] giving up on window %s–%s cursor %d after %d attempts",
+                               self._SERVER, start, end, cursor, max_retries)
                 break
 
             articles = data.get("collection", [])
             if not articles:
-                break  # no more data in this window
+                break
 
             for art in articles:
                 rec = self._normalize(art)
@@ -148,12 +167,11 @@ class _RxivConnector(BaseConnector):
                     if len(collected) >= need:
                         break
 
-            # Pagination: each page has _PAGE_SIZE records; stop when fewer returned
             if len(articles) < _PAGE_SIZE:
-                break  # last page of this window
+                break
 
             cursor += _PAGE_SIZE
-            await asyncio.sleep(0.3)   # gentle rate-limit compliance
+            await asyncio.sleep(0.3)
 
         return collected
 

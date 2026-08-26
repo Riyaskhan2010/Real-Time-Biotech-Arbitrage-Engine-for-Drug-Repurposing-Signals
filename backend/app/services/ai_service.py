@@ -40,7 +40,8 @@ class AIService:
                 print(f"[AIService] OpenAI init failed: {e}. Using deterministic fallback.")
                 self._backend = "heuristic"
         else:
-            print("[AIService] No API key configured. Using deterministic demo logic.")
+            print("[AIService] No OpenAI API key configured — using heuristic analysis engine. "
+                  "Set OPENAI_API_KEY env var to enable LLM-powered extraction and explanations.")
 
     @property
     def backend(self) -> str:

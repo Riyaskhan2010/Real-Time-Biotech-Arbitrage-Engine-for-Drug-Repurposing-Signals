@@ -88,12 +88,12 @@ class PubMedConnector(BaseConnector):
     async def _collect_pmids(self, query: str, max_records: int) -> List[str]:
         """
         Run esearch and paginate through all result pages to collect up to
-        max_records PMIDs. NCBI allows retmax up to 10000; we use 100 per
-        page to stay conservative and avoid timeouts.
+        max_records PMIDs. Retries with exponential backoff on 429 responses.
         """
         all_pmids: List[str] = []
         page_size = 100
         retstart  = 0
+        max_retries = 3
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             while len(all_pmids) < max_records:
@@ -105,14 +105,39 @@ class PubMedConnector(BaseConnector):
                     "retstart": retstart,
                     "sort":     "relevance",
                 }
-                try:
-                    r = await client.get(ESEARCH_URL, params=params)
-                    r.raise_for_status()
-                    data = r.json()
-                except Exception as e:
-                    logger.warning("[PubMed] esearch error for %r: %s", query, e)
+                # Retry loop for 429 / transient errors
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        r = await client.get(ESEARCH_URL, params=params)
+                        if r.status_code == 429:
+                            wait = 2 ** attempt * (1.0 if self._api_key else 2.0)
+                            logger.warning(
+                                "[PubMed] 429 Too Many Requests for %r — "
+                                "waiting %.1fs before retry %d/%d",
+                                query, wait, attempt + 1, max_retries,
+                            )
+                            await asyncio.sleep(wait)
+                            last_error = "rate_limited"
+                            continue
+                        r.raise_for_status()
+                        last_error = None
+                        break
+                    except httpx.TimeoutException:
+                        logger.warning("[PubMed] esearch timeout for %r (attempt %d)", query, attempt + 1)
+                        last_error = "timeout"
+                        await asyncio.sleep(1.0)
+                    except Exception as e:
+                        logger.warning("[PubMed] esearch error for %r: %s", query, e)
+                        last_error = str(e)
+                        break
+
+                if last_error:
+                    logger.warning("[PubMed] esearch gave up for %r after %d attempts: %s",
+                                   query, max_retries, last_error)
                     break
 
+                data = r.json()
                 result = data.get("esearchresult", {})
                 batch  = result.get("idlist", [])
                 if not batch:
@@ -121,7 +146,6 @@ class PubMedConnector(BaseConnector):
                 all_pmids.extend(batch)
                 total_available = int(result.get("count", 0))
 
-                # Stop if we have enough or there are no more results
                 if len(all_pmids) >= max_records or len(all_pmids) >= total_available:
                     break
 
@@ -159,16 +183,26 @@ class PubMedConnector(BaseConnector):
         params.pop("retmode", None)
         params["retmode"] = "xml"
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.get(EFETCH_URL, params=params)
-                r.raise_for_status()
-                xml_text = r.text
-        except Exception as e:
-            logger.warning("[PubMed] efetch error for %d PMIDs: %s", len(pmids), e)
-            return []
-
-        return self._parse_pubmed_xml(xml_text)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    r = await client.get(EFETCH_URL, params=params)
+                    if r.status_code == 429:
+                        wait = 2 ** attempt * (1.0 if self._api_key else 2.0)
+                        logger.warning("[PubMed] efetch 429 — waiting %.1fs (attempt %d/%d)",
+                                       wait, attempt + 1, max_retries)
+                        await asyncio.sleep(wait)
+                        continue
+                    r.raise_for_status()
+                    return self._parse_pubmed_xml(r.text)
+            except httpx.TimeoutException:
+                logger.warning("[PubMed] efetch timeout (attempt %d/%d)", attempt + 1, max_retries)
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.warning("[PubMed] efetch error for %d PMIDs: %s", len(pmids), e)
+                break
+        return []
 
     # ── XML parsing ───────────────────────────────────────────────────────────
 

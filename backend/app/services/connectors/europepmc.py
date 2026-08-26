@@ -123,16 +123,38 @@ class EuropePMCConnector(BaseConnector):
                         "resultType":  "core",
                         "cursorMark":  cursor_mark,
                     }
-                    try:
-                        r = await client.get(_BASE_URL, params=params, headers=_HEADERS)
-                        r.raise_for_status()
-                    except httpx.TimeoutException:
-                        logger.warning("[EuropePMC] Timeout for query %r (cursor=%s)",
-                                       query, cursor_mark)
-                        break
-                    except httpx.HTTPStatusError as e:
-                        logger.warning("[EuropePMC] HTTP %d for query %r",
-                                       e.response.status_code, query)
+                    max_retries = 3
+                    last_err = None
+                    for attempt in range(max_retries):
+                        try:
+                            r = await client.get(_BASE_URL, params=params, headers=_HEADERS)
+                            r.raise_for_status()
+                            last_err = None
+                            break
+                        except httpx.TimeoutException:
+                            logger.warning("[EuropePMC] Timeout for query %r (attempt %d/%d, cursor=%s)",
+                                           query, attempt + 1, max_retries, cursor_mark)
+                            last_err = "timeout"
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                        except httpx.RemoteProtocolError as e:
+                            logger.warning("[EuropePMC] RemoteProtocolError for query %r (attempt %d/%d): %s",
+                                           query, attempt + 1, max_retries, e)
+                            last_err = "remote_protocol_error"
+                            await asyncio.sleep(2.0 * (attempt + 1))
+                        except httpx.TransportError as e:
+                            logger.warning("[EuropePMC] TransportError for query %r (attempt %d/%d): %s",
+                                           query, attempt + 1, max_retries, type(e).__name__)
+                            last_err = "transport_error"
+                            await asyncio.sleep(2.0 * (attempt + 1))
+                        except httpx.HTTPStatusError as e:
+                            logger.warning("[EuropePMC] HTTP %d for query %r",
+                                           e.response.status_code, query)
+                            last_err = f"http_{e.response.status_code}"
+                            break
+
+                    if last_err:
+                        logger.warning("[EuropePMC] gave up on query %r after %d attempts: %s",
+                                       query, max_retries, last_err)
                         break
 
                     data = r.json()
@@ -149,12 +171,11 @@ class EuropePMCConnector(BaseConnector):
                         if len(records) >= max_records:
                             break
 
-                    # Advance cursor; stop if no next cursor returned
                     next_cursor = data.get("nextCursorMark") or ""
                     if not next_cursor or next_cursor == cursor_mark:
                         break
                     cursor_mark = next_cursor
-                    await asyncio.sleep(0.2)   # gentle rate-limit compliance
+                    await asyncio.sleep(0.2)
 
         except Exception as e:
             logger.warning("[EuropePMC] fetch failed for %r: %s", query, type(e).__name__)
