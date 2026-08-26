@@ -57,7 +57,15 @@ export function DashboardPage() {
   const load = useCallback(() => {
     dashboardApi.get()
       .then(setData)
-      .catch(() => setError('Failed to load dashboard data'))
+      .catch((err) => {
+        // 401 = expired/invalid token — the axios interceptor in client.ts
+        // already clears localStorage and redirects to /login.
+        // Don't show an error message for 401 since the redirect is happening.
+        const status = err?.response?.status
+        if (status !== 401) {
+          setError('Failed to load dashboard data')
+        }
+      })
       .finally(() => setLoading(false))
   }, [])
 

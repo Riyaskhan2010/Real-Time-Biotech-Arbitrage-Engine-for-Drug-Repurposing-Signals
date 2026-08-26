@@ -6,8 +6,12 @@
  * /register   → RegisterPage (redirects authenticated users to /dashboard)
  * /dashboard+ → protected, redirects unauthenticated to /login
  *
- * The 401 redirect-to-login logic lives in client.ts interceptor, NOT here.
+ * On mount, App calls initAuth() to validate any stored token against
+ * /api/auth/me BEFORE rendering protected routes. This prevents the
+ * "Failed to load dashboard data" error caused by stale/expired tokens
+ * reaching the dashboard before being cleared.
  */
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Layout }          from './components/Layout'
 import { LandingPage }     from './pages/LandingPage'
@@ -30,19 +34,30 @@ function PublicHome() {
 
 /** /login — redirects authenticated users to dashboard. */
 function PublicLogin() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, isInitializing } = useAuthStore()
+  if (isInitializing) return null   // wait for token validation
   if (isAuthenticated) return <Navigate to="/dashboard" replace />
   return <LoginPage />
 }
 
 /** /register — redirects authenticated users to dashboard. */
 function PublicRegister() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, isInitializing } = useAuthStore()
+  if (isInitializing) return null   // wait for token validation
   if (isAuthenticated) return <Navigate to="/dashboard" replace />
   return <RegisterPage />
 }
 
 export default function App() {
+  const { initAuth, isInitializing } = useAuthStore()
+
+  // Validate any stored token before rendering protected routes.
+  // This runs once on mount and clears expired tokens before the
+  // dashboard page attempts its own API calls.
+  useEffect(() => {
+    initAuth()
+  }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <BrowserRouter>
       <Routes>
@@ -50,6 +65,9 @@ export default function App() {
         <Route path="/login"    element={<PublicLogin />} />
         <Route path="/register" element={<PublicRegister />} />
 
+        {/* Protected routes — Layout redirects to /login if not authenticated.
+            While initAuth is still running (isInitializing=true), Layout shows
+            a blank screen rather than loading protected data with a stale token. */}
         <Route element={<Layout />}>
           <Route path="/dashboard"   element={<DashboardPage />} />
           <Route path="/signals"     element={<SignalsPage />} />
