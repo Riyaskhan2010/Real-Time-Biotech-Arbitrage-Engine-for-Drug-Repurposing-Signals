@@ -41,53 +41,19 @@ def get_dashboard(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    # ── Semantic counts ───────────────────────────────────────────────────────
-    # evidence_records_indexed: total live ResearchSource rows (raw count of
-    #   papers/trials/proteins ingested — this is what showed as "1302")
-    # sources_connected: number of distinct source databases that produced
-    #   at least one live record — semantically correct for "Sources Indexed"
-    # drugs_monitored: Drug rows that have at least one live evidence record
-    #   (not just all Drug rows which includes any orphaned demo entries)
-    # diseases_tracked: Disease rows with at least one live evidence record
-
-    evidence_records_indexed = (
+    # ── Counts ────────────────────────────────────────────────────────────────
+    # total_research_sources: actual number of live indexed source records
+    #   (papers, trials, protein annotations) — this is the "Sources Indexed"
+    #   number that the user expects to see as 4000+ / 5000+ / 6000+ etc.
+    #   It is NOT the number of distinct source databases (that would be 7).
+    live_sources = (
         db.query(ResearchSource)
         .filter(ResearchSource.is_demo_data == False)
         .count()
     )
 
-    # Distinct source databases that have produced live records
-    sources_connected_rows = (
-        db.query(ResearchSource.source_type)
-        .filter(ResearchSource.is_demo_data == False)
-        .distinct()
-        .all()
-    )
-    sources_connected = len(sources_connected_rows)
-
-    # Drugs that appear in at least one live evidence record
-    drugs_with_live_evidence = (
-        db.query(Drug.id)
-        .join(RepurposingSignal, RepurposingSignal.drug_id == Drug.id)
-        .join(Evidence, Evidence.signal_id == RepurposingSignal.id)
-        .filter(Evidence.is_demo_data == False)
-        .distinct()
-        .count()
-    )
-    # Fall back to all Drug rows if no live evidence yet (avoids showing 0
-    # when drugs exist from seeding but ingestion hasn't run yet)
-    drugs_monitored = drugs_with_live_evidence or db.query(Drug).count()
-
-    # Diseases that appear in at least one live evidence record
-    diseases_with_live_evidence = (
-        db.query(Disease.id)
-        .join(RepurposingSignal, RepurposingSignal.disease_id == Disease.id)
-        .join(Evidence, Evidence.signal_id == RepurposingSignal.id)
-        .filter(Evidence.is_demo_data == False)
-        .distinct()
-        .count()
-    )
-    diseases_tracked = diseases_with_live_evidence or db.query(Disease).count()
+    drugs_monitored  = db.query(Drug).count()
+    diseases_tracked = db.query(Disease).count()
 
     total_signals = db.query(RepurposingSignal).filter(
         RepurposingSignal.status == "active"
@@ -110,12 +76,7 @@ def get_dashboard(
     )
 
     stats = DashboardStats(
-        # Semantically correct: number of distinct source databases connected
-        total_research_sources=sources_connected,
-        # Raw evidence record count — available via stats.evidence_records
-        # (DashboardStats schema already has this field from a previous fix,
-        #  or we pass it through the existing total_research_sources which
-        #  the frontend renders as "Sources Indexed")
+        total_research_sources=live_sources,
         drugs_monitored=drugs_monitored,
         diseases_tracked=diseases_tracked,
         total_signals=total_signals,
