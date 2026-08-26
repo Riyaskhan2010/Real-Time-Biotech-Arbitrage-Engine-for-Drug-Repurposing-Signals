@@ -4,37 +4,73 @@ services:
     runtime: python
     region: singapore
     rootDir: backend
+    # Runs pip install then starts uvicorn.
+    # alembic upgrade head is intentionally NOT in buildCommand — schema
+    # creation is handled by SQLAlchemy Base.metadata.create_all() at startup,
+    # which is safe and idempotent for both SQLite and PostgreSQL.
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    # Persistent disk — survives redeploys and restarts.
-    # SQLite database is stored here so real ingested data is never lost.
-    # Free-tier Render: use the smallest available disk (1 GB is sufficient).
+
+    # ── Persistent disk (SQLite option) ──────────────────────────────────────
+    # Used when DATABASE_URL points to a SQLite file on this disk.
+    # If you switch to PostgreSQL (recommended for multi-user), remove or
+    # comment out this disk block and set DATABASE_URL to your PostgreSQL URL.
     disk:
       name: bioarbitrage-data
       mountPath: /data
       sizeGB: 1
+
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+
       - key: APP_ENV
         value: production
-      # Persistent SQLite path on the mounted disk.
-      # Set this in Render Dashboard → Environment if you need to override.
+
+      # ── Demo seeding — MUST be false in production ────────────────────────
+      # This is the explicit flag that disables demo seeding.
+      # APP_ENV=production also disables it as a safety backstop.
+      - key: ENABLE_DEMO_SEED
+        value: "false"
+
+      # ── Database ──────────────────────────────────────────────────────────
+      # OPTION A (default): SQLite on persistent disk.
+      #   Suitable for single-instance deployments.
+      #   Data survives redeploys because it is on the mounted disk above.
       - key: DATABASE_URL
         value: sqlite:////data/bioarbitrage.db
-      # Required — set a strong random value in Render Dashboard → Environment
-      # Example: openssl rand -hex 32
+
+      # OPTION B: PostgreSQL (recommended for multi-user / multi-worker).
+      #   1. Create a PostgreSQL database in Render Dashboard.
+      #   2. Copy its Internal Database URL.
+      #   3. Set DATABASE_URL to that URL in Render Dashboard → Environment.
+      #      Format: postgresql://user:password@host:5432/dbname
+      #   4. Remove or comment out the disk block above.
+      #   5. Add psycopg2-binary to requirements.txt (already done).
+      # Do NOT put the actual URL here — set it in Render Dashboard only.
+      # - key: DATABASE_URL
+      #   sync: false   # set manually in Render Dashboard
+
+      # ── Auth ──────────────────────────────────────────────────────────────
+      # Required — generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      # Set this in Render Dashboard → Environment, never commit it here.
       - key: SECRET_KEY
-        sync: false   # tells Render this must be set manually — never auto-generated
-      # Optional — increases PubMed API rate limit from 3 to 10 req/s
-      # Get a free key at https://www.ncbi.nlm.nih.gov/account/
+        sync: false
+
+      # ── Ingestion API keys (optional) ─────────────────────────────────────
+      # PubMed NCBI API key — raises rate limit from 3 → 10 req/s.
+      # Free: https://www.ncbi.nlm.nih.gov/account/
       - key: NCBI_API_KEY
         sync: false
-      # Optional — required for Elsevier/Scopus source
-      # Get a key at https://dev.elsevier.com/
+
+      # Elsevier/Scopus API key — required for Elsevier source.
+      # Free: https://dev.elsevier.com/
+      # Server-side only — never sent to frontend or logged.
       - key: ELSEVIER_API_KEY
         sync: false
-      # Set to your frontend Render URL after frontend deploys
+
+      # ── CORS ──────────────────────────────────────────────────────────────
+      # Set to your Render frontend URL after the static site deploys.
       # Example: https://real-time-biotech-arbitrage-engine-for-1mow.onrender.com
       - key: ALLOWED_ORIGINS
         sync: false

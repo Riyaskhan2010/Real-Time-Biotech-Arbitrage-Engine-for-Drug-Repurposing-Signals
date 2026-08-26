@@ -14,6 +14,7 @@ No API keys are ever exposed to the frontend.
 """
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -30,8 +31,31 @@ from app.utils.auth import get_current_active_user
 router = APIRouter(prefix="/api/ingestion", tags=["ingestion"])
 logger = logging.getLogger(__name__)
 
-# Guard: only one run at a time
-_run_in_progress = False
+
+# ── DB-backed ingestion lock ──────────────────────────────────────────────────
+#
+# The previous module-level `_run_in_progress = False` global was unsafe for
+# multi-process or multi-worker deployments: each worker had its own copy of
+# the flag, so concurrent ingestion jobs on different workers bypassed the guard.
+#
+# New approach: store the lock state in the `ingestion_runs` table itself.
+# "Running" means there is a row with status="running" and started_at within
+# the last LOCK_TIMEOUT_MINUTES minutes.  The timeout prevents a crash from
+# leaving the system permanently locked.
+#
+# This is safe for any number of workers / replicas as long as they share the
+# same database (which they must — SQLite or PostgreSQL).
+
+LOCK_TIMEOUT_MINUTES = 30   # a run older than this is considered stale/dead
+
+
+def _ingestion_is_running(db: Session) -> bool:
+    """Return True if a non-stale ingestion run is currently in progress."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOCK_TIMEOUT_MINUTES)
+    return db.query(IngestionRun).filter(
+        IngestionRun.status == "running",
+        IngestionRun.started_at >= cutoff,
+    ).first() is not None
 
 
 # ── Request bodies ────────────────────────────────────────────────────────────
@@ -69,22 +93,19 @@ async def run_ingestion(
     When query_terms is omitted the configured INGESTION_QUERY_TERMS are used.
     Each query term is sent to all enabled sources; results are deduplicated,
     entity-extracted, matched to signals, and stored.
+
+    Lock: uses the ingestion_runs table to prevent concurrent runs across
+    all workers/processes sharing the same database.
     """
-    global _run_in_progress
-    if _run_in_progress:
+    if _ingestion_is_running(db):
         raise HTTPException(
             status_code=409,
             detail="An ingestion run is already in progress. Please wait for it to finish.",
         )
 
     query_terms = (body.query_terms if body and body.query_terms else None)
-
-    _run_in_progress = True
-    try:
-        run = await ingestion_service.run(db, query_terms=query_terms)
-        return run
-    finally:
-        _run_in_progress = False
+    run = await ingestion_service.run(db, query_terms=query_terms)
+    return run
 
 
 @router.post("/search", response_model=IngestionRunOut)
@@ -95,22 +116,9 @@ async def search_drug_disease(
 ):
     """
     On-demand research search for a specific drug + disease combination.
-
-    The system constructs optimised queries for each source:
-      - General:         "{drug} {disease}"
-      - Structured:      "drug:{drug} disease:{disease}"  (used by UniProt connector)
-      - Mechanism:       "{drug} mechanism {disease}"
-      - Clinical:        "{drug} clinical trial {disease}"
-      - Target/pathway:  "{drug} pathway"
-
-    All enabled sources are queried. Results enter the full evidence pipeline
-    (dedup → entity match → signal update → rescore).
-
-    This endpoint allows researchers to search for ANY drug + disease without
-    modifying configuration.
+    Uses DB-backed lock — safe across multiple workers/processes.
     """
-    global _run_in_progress
-    if _run_in_progress:
+    if _ingestion_is_running(db):
         raise HTTPException(
             status_code=409,
             detail="An ingestion run is already in progress. Please wait.",
@@ -121,15 +129,9 @@ async def search_drug_disease(
     if not drug or not disease:
         raise HTTPException(status_code=422, detail="Both 'drug' and 'disease' are required.")
 
-    # Build source-appropriate query variants
     query_terms = _build_search_queries(drug, disease, body.extra_terms or [])
-
-    _run_in_progress = True
-    try:
-        run = await ingestion_service.run(db, query_terms=query_terms)
-        return run
-    finally:
-        _run_in_progress = False
+    run = await ingestion_service.run(db, query_terms=query_terms)
+    return run
 
 
 @router.get("/query-terms")
@@ -194,9 +196,12 @@ async def get_source_status(
 
 
 @router.get("/running")
-def is_running(current_user=Depends(get_current_active_user)):
-    """Quick check whether an ingestion run is currently in progress."""
-    return {"running": _run_in_progress}
+def is_running(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Check whether an ingestion run is currently in progress (DB-backed, multi-worker safe)."""
+    return {"running": _ingestion_is_running(db)}
 
 
 # ── Query builder ─────────────────────────────────────────────────────────────

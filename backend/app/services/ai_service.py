@@ -416,33 +416,182 @@ class AIService:
             return self._heuristic_explain_signal(drug_name, disease_name, mechanism, evidence_items, score)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Deterministic demo implementations (no API required)
+    # Heuristic implementations (no LLM API required)
+    #
+    # The drug and disease dictionaries are intentionally broad so that live
+    # evidence from PubMed, bioRxiv, EuropePMC etc. produces entity matches
+    # even without an OpenAI key.  Entries use lowercase for lookup; display
+    # names are capitalised at match time.
+    #
+    # These lists are NOT exhaustive — the ingestion pipeline supplements them
+    # with query-context hints and connector-pre-populated fields (UniProt,
+    # ClinicalTrials).  The auto-create logic in ingestion_service.py handles
+    # entities that fall outside these lists entirely.
     # ──────────────────────────────────────────────────────────────────────────
 
-    _KNOWN_DRUGS = {
-        "metformin", "rapamycin", "sirolimus", "sildenafil", "doxycycline",
-        "lithium", "naltrexone", "thalidomide", "ivermectin", "aspirin",
-        "ibuprofen", "temozolomide", "bevacizumab", "pembrolizumab",
+    # ── Drugs ─────────────────────────────────────────────────────────────────
+    # Sorted loosely by therapeutic area for maintainability.
+    _KNOWN_DRUGS: set = {
+        # Diabetes / metabolic
+        "metformin", "glipizide", "glimepiride", "sitagliptin", "empagliflozin",
+        "liraglutide", "semaglutide", "pioglitazone", "rosiglitazone", "exenatide",
+        "canagliflozin", "dapagliflozin", "insulin",
+        # mTOR / longevity
+        "rapamycin", "sirolimus", "everolimus", "temsirolimus",
+        # Cardiovascular / PDE5
+        "sildenafil", "tadalafil", "vardenafil", "amlodipine", "atorvastatin",
+        "rosuvastatin", "simvastatin", "losartan", "lisinopril", "carvedilol",
+        "metoprolol", "digoxin", "warfarin", "clopidogrel", "aspirin",
+        "ibuprofen", "naproxen", "celecoxib", "rivaroxaban", "apixaban",
+        # Neurological / psychiatric
+        "lithium", "valproate", "levetiracetam", "memantine", "donepezil",
+        "rivastigmine", "galantamine", "amantadine", "selegiline", "rasagiline",
+        "pramipexole", "ropinirole", "levodopa", "carbidopa", "riluzole",
+        "naltrexone", "naloxone", "buprenorphine", "clozapine", "olanzapine",
+        "risperidone", "haloperidol", "quetiapine", "aripiprazole",
+        "sertraline", "fluoxetine", "paroxetine", "escitalopram", "venlafaxine",
+        "duloxetine", "bupropion", "amitriptyline", "nortriptyline",
+        # Oncology
+        "tamoxifen", "letrozole", "anastrozole", "exemestane", "fulvestrant",
+        "trastuzumab", "bevacizumab", "pembrolizumab", "nivolumab", "ipilimumab",
+        "atezolizumab", "durvalumab", "cetuximab", "panitumumab", "rituximab",
+        "imatinib", "dasatinib", "nilotinib", "erlotinib", "gefitinib",
+        "osimertinib", "crizotinib", "alectinib", "ibrutinib", "venetoclax",
+        "bortezomib", "carfilzomib", "lenalidomide", "thalidomide", "pomalidomide",
+        "sorafenib", "sunitinib", "pazopanib", "regorafenib", "cabozantinib",
+        "temozolomide", "capecitabine", "fluorouracil", "gemcitabine",
+        "oxaliplatin", "cisplatin", "carboplatin", "paclitaxel", "docetaxel",
+        "doxorubicin", "cyclophosphamide", "vincristine", "methotrexate",
+        # Immune / inflammation
+        "dexamethasone", "prednisone", "methylprednisolone", "hydroxychloroquine",
+        "chloroquine", "colchicine", "azathioprine", "mycophenolate",
+        "tacrolimus", "cyclosporine", "infliximab", "adalimumab", "etanercept",
+        "tocilizumab", "baricitinib", "tofacitinib", "upadacitinib", "ruxolitinib",
+        # Antibiotics / antivirals / antiparasitic
+        "doxycycline", "minocycline", "azithromycin", "clarithromycin",
+        "amoxicillin", "ciprofloxacin", "trimethoprim", "rifampicin",
+        "ivermectin", "hydroxychloroquine", "remdesivir", "molnupiravir",
+        "oseltamivir", "acyclovir", "tenofovir", "emtricitabine",
+        # Pulmonary
+        "bosentan", "ambrisentan", "macitentan", "epoprostenol", "iloprost",
+        "riociguat", "nintedanib", "pirfenidone",
+        # Other
+        "caffeine", "melatonin", "resveratrol", "curcumin", "quercetin",
+        "omega-3", "vitamin d", "niacin", "nicotinamide", "nicotinamide riboside",
+        "berberine", "spermidine", "fisetin", "dasatinib",
     }
-    _KNOWN_DISEASES = {
-        "alzheimer", "glioblastoma", "diabetes", "cancer", "multiple sclerosis",
-        "parkinson", "hypertension", "breast cancer", "pancreatic", "obesity",
-        "myeloma", "pulmonary arterial hypertension", "pulmonary hypertension",
-        "neurodegeneration", "dementia", "tumor", "lymphoma", "leukemia",
-        "melanoma", "carcinoma", "adenocarcinoma", "sarcoma",
+
+    # ── Diseases ──────────────────────────────────────────────────────────────
+    _KNOWN_DISEASES: set = {
+        # Neurological
+        "alzheimer", "alzheimer's disease", "parkinson", "parkinson's disease",
+        "multiple sclerosis", "amyotrophic lateral sclerosis", "als",
+        "huntington", "epilepsy", "dementia", "neurodegeneration",
+        "frontotemporal dementia", "lewy body dementia", "vascular dementia",
+        "stroke", "traumatic brain injury", "spinal cord injury",
+        "neuropathy", "peripheral neuropathy", "migraine",
+        # Oncology
+        "cancer", "glioblastoma", "glioma", "brain cancer",
+        "breast cancer", "lung cancer", "colorectal cancer", "colon cancer",
+        "pancreatic cancer", "ovarian cancer", "prostate cancer",
+        "melanoma", "leukemia", "lymphoma", "myeloma", "multiple myeloma",
+        "hepatocellular carcinoma", "liver cancer", "gastric cancer",
+        "bladder cancer", "kidney cancer", "renal cell carcinoma",
+        "thyroid cancer", "endometrial cancer", "cervical cancer",
+        "sarcoma", "neuroblastoma", "medulloblastoma", "mesothelioma",
+        "carcinoma", "adenocarcinoma", "tumor", "metastasis",
+        # Cardiovascular / metabolic
+        "heart failure", "cardiac failure", "atrial fibrillation",
+        "coronary artery disease", "myocardial infarction", "heart attack",
+        "hypertension", "pulmonary hypertension", "pulmonary arterial hypertension",
+        "diabetes", "type 2 diabetes", "type 1 diabetes", "obesity",
+        "metabolic syndrome", "dyslipidemia", "hypercholesterolemia",
+        "atherosclerosis", "cardiomyopathy", "arrhythmia",
+        # Pulmonary
+        "asthma", "copd", "chronic obstructive pulmonary disease",
+        "idiopathic pulmonary fibrosis", "pulmonary fibrosis",
+        "cystic fibrosis", "acute respiratory distress syndrome",
+        # Immune / inflammatory
+        "rheumatoid arthritis", "lupus", "systemic lupus erythematosus",
+        "inflammatory bowel disease", "crohn's disease", "ulcerative colitis",
+        "psoriasis", "ankylosing spondylitis", "sjogren's syndrome",
+        "vasculitis", "scleroderma", "fibromyalgia",
+        "sepsis", "cytokine storm",
+        # Infectious
+        "covid-19", "sars-cov-2", "influenza", "hiv", "hepatitis",
+        "tuberculosis", "malaria",
+        # Other
+        "aging", "sarcopenia", "osteoporosis", "osteoarthritis",
+        "kidney disease", "chronic kidney disease", "acute kidney injury",
+        "liver disease", "non-alcoholic fatty liver disease", "nafld",
+        "depression", "anxiety", "bipolar disorder", "schizophrenia",
+        "autism", "adhd", "sleep disorder", "insomnia",
+        "hearing loss", "retinal degeneration", "macular degeneration",
+        "duchenne muscular dystrophy", "spinal muscular atrophy",
+        "amyloidosis", "prion disease",
     }
-    _KNOWN_MECHANISMS = {
-        "ampk", "mtor", "autophagy", "apoptosis", "kinase", "inhibitor",
-        "phosphorylation", "signaling", "pathway", "receptor", "oxidative stress",
-        "neuroinflammation", "angiogenesis", "proteasome", "ubiquitin",
+
+    # ── Mechanisms ────────────────────────────────────────────────────────────
+    _KNOWN_MECHANISMS: set = {
+        "ampk", "mtor", "mtorc1", "mtorc2", "autophagy", "apoptosis",
+        "necroptosis", "ferroptosis", "pyroptosis",
+        "kinase", "tyrosine kinase", "serine threonine kinase",
+        "phosphorylation", "dephosphorylation",
+        "ubiquitin", "proteasome", "ubiquitin-proteasome",
+        "oxidative stress", "reactive oxygen species", "ros",
+        "neuroinflammation", "inflammation", "nf-kb", "nlrp3",
+        "angiogenesis", "vegf", "egfr", "her2",
+        "receptor", "agonist", "antagonist", "inhibitor",
+        "signaling", "wnt", "hedgehog", "notch", "jak-stat",
+        "pi3k", "akt", "erk", "mapk", "ras",
+        "dna repair", "dna damage", "p53", "brca1", "brca2",
+        "epigenetics", "methylation", "histone", "chromatin",
+        "mitochondria", "mitochondrial", "oxidative phosphorylation",
+        "metabolism", "glycolysis", "fatty acid oxidation",
+        "protein aggregation", "amyloid", "tau", "alpha-synuclein",
+        "blood-brain barrier", "neurogenesis",
+        "immune checkpoint", "pd-l1", "pd-1", "ctla-4",
+        "t cell", "b cell", "nk cell", "macrophage", "microglia",
+        "cytokine", "interleukin", "interferon", "tumor necrosis factor",
+        "senescence", "telomere", "cell cycle", "g1", "s phase",
     }
 
     def _heuristic_extract_entities(self, text: str) -> dict:
+        """
+        Extract biomedical entities using keyword matching against curated
+        dictionaries.  Longer/more-specific terms are matched before shorter
+        ones to avoid partial false matches (e.g. "cancer" inside "breast cancer").
+        """
         text_lower = text.lower()
-        drugs = [d.capitalize() for d in self._KNOWN_DRUGS if d in text_lower]
-        diseases = [d.title() for d in self._KNOWN_DISEASES if d in text_lower]
-        mechanisms = [m for m in self._KNOWN_MECHANISMS if m in text_lower]
-        return {"drugs": drugs, "diseases": diseases, "mechanisms": mechanisms, "targets": []}
+
+        # Sort by length descending so multi-word terms match before sub-words
+        drugs = []
+        seen_drug_positions: set = set()
+        for d in sorted(self._KNOWN_DRUGS, key=len, reverse=True):
+            pos = text_lower.find(d)
+            if pos != -1 and pos not in seen_drug_positions:
+                drugs.append(d.title())
+                seen_drug_positions.add(pos)
+
+        diseases = []
+        seen_dis_positions: set = set()
+        for d in sorted(self._KNOWN_DISEASES, key=len, reverse=True):
+            pos = text_lower.find(d)
+            if pos != -1 and pos not in seen_dis_positions:
+                diseases.append(d.title())
+                seen_dis_positions.add(pos)
+
+        mechanisms = []
+        for m in sorted(self._KNOWN_MECHANISMS, key=len, reverse=True):
+            if m in text_lower:
+                mechanisms.append(m)
+
+        return {
+            "drugs":      drugs[:10],      # cap to avoid noise
+            "diseases":   diseases[:10],
+            "mechanisms": mechanisms[:15],
+            "targets":    [],
+        }
 
     def _deterministic_identify_mechanisms(self, drug_name: str, disease_name: str,
                                             drug_targets: List[str], disease_pathways: List[str]) -> Dict[str, Any]:

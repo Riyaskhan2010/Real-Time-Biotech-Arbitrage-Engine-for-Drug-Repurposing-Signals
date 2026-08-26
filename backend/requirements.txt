@@ -5,6 +5,9 @@ uvicorn[standard]==0.29.0
 # Database
 sqlalchemy==2.0.30
 alembic==1.13.1
+# PostgreSQL driver — required when DATABASE_URL is a postgresql:// URL.
+# Ignored when using SQLite (the default for local dev).
+psycopg2-binary==2.9.9
 
 # Pydantic — pydantic-core version must match pydantic exactly
 pydantic==2.7.1

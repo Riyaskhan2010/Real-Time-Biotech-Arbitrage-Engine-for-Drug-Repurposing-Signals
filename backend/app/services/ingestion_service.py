@@ -335,31 +335,149 @@ class IngestionService:
             ResearchSource.source_id   == rec.source_id,
         ).first() is not None
 
-    # ── Entity matching ───────────────────────────────────────────────────────
+    # ── Entity matching + auto-creation ──────────────────────────────────────
+    #
+    # KEY FIX: On a fresh production database there are zero Drug/Disease rows.
+    # The previous code only searched existing rows — so every live record
+    # returned "new_unmatched" and the dashboard showed "Drugs: 0 / Diseases: 0".
+    #
+    # New behaviour:
+    #   1. Try to match against existing DB rows (case-insensitive ilike).
+    #   2. If no match found AND the name passes minimum quality checks,
+    #      create a new Drug/Disease row from the live evidence metadata.
+    #      These rows are NOT marked is_demo_data — they are live entities.
+    #   3. This ensures every valid drug/disease name extracted from live
+    #      evidence has a corresponding DB record that signals can reference.
+    #
+    # Quality guard: names shorter than 4 chars or in a stop-word list are
+    # rejected to avoid creating junk entities like "the", "drug", "new".
+    # ─────────────────────────────────────────────────────────────────────────
+
+    _ENTITY_STOP_WORDS = {
+        "drug", "drugs", "disease", "diseases", "therapy", "treatment",
+        "clinical", "trial", "mechanism", "pathway", "research", "study",
+        "evidence", "effect", "effects", "role", "novel", "new", "review",
+        "repurposing", "target", "targets", "inhibitor", "inhibition",
+        "expression", "regulation", "activity", "function", "model",
+        "mouse", "human", "cell", "cells", "protein", "gene", "genes",
+        "association", "analysis", "patient", "patients", "method",
+    }
 
     def _match_drugs(self, db: Session, names: List[str]) -> List[Drug]:
+        """Match or create Drug rows for each candidate name."""
         matched: List[Drug] = []
-        seen_ids = set()
+        seen_ids: set = set()
         for name in names:
-            if not name or len(name) < 3:
+            name = (name or "").strip()
+            if len(name) < 4 or name.lower() in self._ENTITY_STOP_WORDS:
                 continue
             drug = db.query(Drug).filter(Drug.name.ilike(f"%{name}%")).first()
+            if drug is None:
+                drug = self._create_drug_from_evidence(db, name)
             if drug and drug.id not in seen_ids:
                 matched.append(drug)
                 seen_ids.add(drug.id)
         return matched
 
     def _match_diseases(self, db: Session, names: List[str]) -> List[Disease]:
+        """Match or create Disease rows for each candidate name."""
         matched: List[Disease] = []
-        seen_ids = set()
+        seen_ids: set = set()
         for name in names:
-            if not name or len(name) < 3:
+            name = (name or "").strip()
+            if len(name) < 4 or name.lower() in self._ENTITY_STOP_WORDS:
                 continue
             disease = db.query(Disease).filter(Disease.name.ilike(f"%{name}%")).first()
+            if disease is None:
+                disease = self._create_disease_from_evidence(db, name)
             if disease and disease.id not in seen_ids:
                 matched.append(disease)
                 seen_ids.add(disease.id)
         return matched
+
+    def _create_drug_from_evidence(self, db: Session, name: str) -> Optional[Drug]:
+        """
+        Create a minimal Drug record from a live evidence entity name.
+        Only called when no existing DB row matches.
+        The record is populated with the known name and placeholder fields
+        so evidence and signals can reference it immediately.
+        """
+        canonical = name.strip().title()
+        # Double-check it doesn't exist under the canonical form
+        existing = db.query(Drug).filter(Drug.name.ilike(canonical)).first()
+        if existing:
+            return existing
+        try:
+            drug = Drug(
+                name=canonical,
+                generic_name=canonical.lower(),
+                drug_class="Unknown — extracted from live evidence",
+                mechanism_of_action=(
+                    f"Mechanism not yet characterised for {canonical}. "
+                    "Extracted from live research ingestion."
+                ),
+                approved_indications=[],
+                molecular_targets=[],
+                pathways=[],
+                fda_status="unknown",
+                approval_year=None,
+                description=(
+                    f"{canonical} was identified in live research evidence ingested "
+                    "by BioArbitrage. Profile will be enriched as more evidence is indexed."
+                ),
+            )
+            db.add(drug)
+            db.commit()
+            db.refresh(drug)
+            logger.info("[Ingestion] Created new Drug entity from live evidence: %r", canonical)
+            return drug
+        except IntegrityError:
+            db.rollback()
+            return db.query(Drug).filter(Drug.name.ilike(canonical)).first()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("[Ingestion] Could not create Drug %r: %s", canonical, exc)
+            return None
+
+    def _create_disease_from_evidence(self, db: Session, name: str) -> Optional[Disease]:
+        """
+        Create a minimal Disease record from a live evidence entity name.
+        Only called when no existing DB row matches.
+        """
+        canonical = name.strip().title()
+        existing = db.query(Disease).filter(Disease.name.ilike(canonical)).first()
+        if existing:
+            return existing
+        try:
+            disease = Disease(
+                name=canonical,
+                icd10_code=None,
+                category="Unknown — extracted from live evidence",
+                description=(
+                    f"{canonical} was identified in live research evidence ingested "
+                    "by BioArbitrage. Profile will be enriched as more evidence is indexed."
+                ),
+                affected_pathways=[],
+                molecular_markers=[],
+                current_treatments=[],
+                unmet_needs=(
+                    f"Unmet needs for {canonical} not yet characterised. "
+                    "Extracted from live research ingestion."
+                ),
+                prevalence="Unknown",
+            )
+            db.add(disease)
+            db.commit()
+            db.refresh(disease)
+            logger.info("[Ingestion] Created new Disease entity from live evidence: %r", canonical)
+            return disease
+        except IntegrityError:
+            db.rollback()
+            return db.query(Disease).filter(Disease.name.ilike(canonical)).first()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("[Ingestion] Could not create Disease %r: %s", canonical, exc)
+            return None
 
     # ── Persist research source ───────────────────────────────────────────────
 
@@ -371,6 +489,12 @@ class IngestionService:
         matched_diseases: List[Disease],
         mechs: List[str],
     ) -> ResearchSource:
+        # Use matched DB entity names when available; fall back to raw extracted names.
+        # This ensures Research Monitor always shows the names that were identified,
+        # even if DB matching only found a partial set.
+        saved_drugs    = [d.name for d in matched_drugs] if matched_drugs else rec.extracted_drugs
+        saved_diseases = [d.name for d in matched_diseases] if matched_diseases else rec.extracted_diseases
+
         row = ResearchSource(
             source_type=rec.source,
             source_id=rec.source_id,
@@ -383,8 +507,8 @@ class IngestionService:
             pmid=rec.pmid,
             nct_id=rec.nct_id,
             source_url=rec.source_url,
-            extracted_drugs=[d.name for d in matched_drugs] or rec.extracted_drugs,
-            extracted_diseases=[d.name for d in matched_diseases] or rec.extracted_diseases,
+            extracted_drugs=saved_drugs,
+            extracted_diseases=saved_diseases,
             extracted_mechanisms=mechs,
             is_processed=True,
             is_demo_data=False,
