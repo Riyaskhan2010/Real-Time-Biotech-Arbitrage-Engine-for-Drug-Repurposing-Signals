@@ -71,15 +71,19 @@ class _RxivConnector(BaseConnector):
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
-    async def fetch(self, query: str, max_records: int = 50) -> List[NormalizedRecord]:
+    async def fetch(
+        self,
+        query: str,
+        max_records: int = 50,
+        since_days: Optional[int] = None,
+    ) -> List[NormalizedRecord]:
         """
         Fetch preprints matching `query` keywords.
 
-        Strategy:
-          1. Build query keywords from the query string.
-          2. Slide a window back in time, fetching pages until we have
-             enough relevant results or have exhausted 2 years of history.
-          3. Each page is filtered locally by keyword match in title/abstract.
+        since_days: when set (scheduled runs), restricts the date window to
+          the last N days so only genuinely new preprints are fetched.
+          Safety buffer: window = max(since_days * 2, 7) to handle failed runs.
+          When None (manual / first-time), slides back up to 2 years as before.
         """
         if not query or not query.strip():
             return []
@@ -89,21 +93,30 @@ class _RxivConnector(BaseConnector):
             return []
 
         results: List[NormalizedRecord] = []
-        end_date   = date.today()
-        max_windows = 8   # 8 × 90 days ≈ 2 years
+        end_date = date.today()
 
-        # Share one client across all windows to avoid TCP reconnect overhead
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for _ in range(max_windows):
-                if len(results) >= max_records:
-                    break
-                start_date = end_date - timedelta(days=_WINDOW_DAYS)
-                window_results = await self._fetch_window(
-                    client, start_date, end_date, keywords,
-                    need=max_records - len(results),
+        if since_days:
+            # Scheduled run: single tight window with 2× safety buffer
+            window  = max(since_days * 2, 7)
+            start_date = end_date - timedelta(days=window)
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                results = await self._fetch_window(
+                    client, start_date, end_date, keywords, need=max_records
                 )
-                results.extend(window_results)
-                end_date = start_date - timedelta(days=1)
+        else:
+            # Manual / full-history: slide back up to 2 years
+            max_windows = 8   # 8 × 90 days ≈ 2 years
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                for _ in range(max_windows):
+                    if len(results) >= max_records:
+                        break
+                    start_date = end_date - timedelta(days=_WINDOW_DAYS)
+                    window_results = await self._fetch_window(
+                        client, start_date, end_date, keywords,
+                        need=max_records - len(results),
+                    )
+                    results.extend(window_results)
+                    end_date = start_date - timedelta(days=1)
 
         return results[:max_records]
 

@@ -75,15 +75,34 @@ class ElsevierConnector(BaseConnector):
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
-    async def fetch(self, query: str, max_records: int = 50) -> List[NormalizedRecord]:
+    async def fetch(
+        self,
+        query: str,
+        max_records: int = 50,
+        since_days: Optional[int] = None,
+    ) -> List[NormalizedRecord]:
         """
         Search Scopus for articles matching `query`.
 
-        Paginates using 'start' offset until max_records is reached or
-        totalResults is exhausted. Never exposes the API key.
+        since_days: when set (scheduled runs), appends a LOAD-DATE filter to
+          the Scopus query so only documents loaded into Scopus in the last
+          N days are returned. Safety buffer: window = max(since_days * 2, 7).
+          When None (manual), no date filter — full history.
+
+        Paginates using 'start' offset until max_records is reached.
         """
         if not self._is_configured or not query or not query.strip():
             return []
+
+        # Build Scopus query with optional load-date freshness filter
+        scopus_query = f"TITLE-ABS-KEY({query})"
+        if since_days:
+            from datetime import date as _date, timedelta as _td
+            window    = max(since_days * 2, 7)
+            since_str = (_date.today() - _td(days=window)).strftime("%Y%m%d")
+            today_str = _date.today().strftime("%Y%m%d")
+            # LOAD-DATE is the date a document was added to the Scopus index
+            scopus_query = f"{scopus_query} AND LOAD-DATE AFT {since_str}"
 
         records: List[NormalizedRecord] = []
         start = 0
@@ -94,7 +113,7 @@ class ElsevierConnector(BaseConnector):
                 while len(records) < max_records:
                     page_count = min(_PAGE_SIZE, max_records - len(records))
                     params = {
-                        "query": f"TITLE-ABS-KEY({query})",
+                        "query": scopus_query,
                         "count": page_count,
                         "start": start,
                         "field": (

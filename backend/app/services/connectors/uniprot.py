@@ -75,18 +75,23 @@ class UniProtConnector(BaseConnector):
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
-    async def fetch(self, query: str, max_records: int = 25) -> List[NormalizedRecord]:
+    async def fetch(
+        self,
+        query: str,
+        max_records: int = 25,
+        since_days: Optional[int] = None,
+    ) -> List[NormalizedRecord]:
         """
         Search UniProt for proteins/genes related to `query`.
 
-        The query is passed directly to UniProt full-text search, which
-        searches protein names, gene names, functions, disease associations,
-        and keywords. Any drug name, disease name, gene, or protein works.
+        since_days: when set (scheduled runs), appends a date_modified filter
+          so only entries modified in the last N days are returned.
+          Safety buffer: window = max(since_days * 2, 7).
+          UniProt search supports `date_modified:[YYYY-MM-DD TO *]` natively.
+          When None (manual), no date filter — full history.
 
-        FIX: We parse drug/disease hints from the query and carry them
-        on each NormalizedRecord.extracted_drugs / .extracted_diseases so
-        the ingestion pipeline can match without relying on heuristic
-        entity extraction of protein description text.
+        The query is passed directly to UniProt full-text search.
+        drug/disease hints are carried on each NormalizedRecord for pipeline matching.
         """
         if not query or not query.strip():
             return []
@@ -94,9 +99,19 @@ class UniProtConnector(BaseConnector):
         # Parse query hints for entity matching
         drug_hints, disease_hints = _parse_query_hints(query)
 
-        records: List[NormalizedRecord] = []
+        # Build UniProt query with optional freshness filter
+        uniprot_query = query.strip()
+        if since_days:
+            from datetime import date as _date, timedelta as _td
+            window    = max(since_days * 2, 7)
+            since_str = (_date.today() - _td(days=window)).strftime("%Y-%m-%d")
+            # Wrap both parts in parentheses — UniProt requires this for
+            # combined text+field queries to parse correctly.
+            uniprot_query = f"({uniprot_query}) AND (date_modified:[{since_str} TO *])"
+
+        records = []
         params = {
-            "query":  query.strip(),
+            "query":  uniprot_query,
             "format": "json",
             "size":   str(_PAGE_SIZE),
         }
@@ -126,7 +141,7 @@ class UniProtConnector(BaseConnector):
                     if not next_cursor or len(records) >= max_records:
                         break
                     params = {
-                        "query":  query.strip(),
+                        "query":  uniprot_query,
                         "format": "json",
                         "size":   str(_PAGE_SIZE),
                         "cursor": next_cursor,

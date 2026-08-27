@@ -64,9 +64,20 @@ class PubMedConnector(BaseConnector):
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
-    async def fetch(self, query: str, max_records: int = 50) -> List[NormalizedRecord]:
+    async def fetch(
+        self,
+        query: str,
+        max_records: int = 50,
+        since_days: Optional[int] = None,
+    ) -> List[NormalizedRecord]:
         """
         Search PubMed for articles matching `query`.
+
+        since_days: when set (scheduled runs), adds a `reldate` filter so only
+          records added/modified in the last N days are returned. This is the
+          PubMed-native "freshness" mechanism — `datetype=edat` (Entrez Date =
+          date the record was added to PubMed's index).
+          When None (manual runs / first-time), no date filter — full history.
 
         Paginates through esearch results to collect up to max_records PMIDs,
         then fetches full records in batches. Rate-limited to comply with
@@ -75,7 +86,7 @@ class PubMedConnector(BaseConnector):
         if not query or not query.strip():
             return []
         try:
-            pmids = await self._collect_pmids(query, max_records)
+            pmids = await self._collect_pmids(query, max_records, since_days=since_days)
             if not pmids:
                 return []
             return await self._fetch_details_batched(pmids)
@@ -85,10 +96,20 @@ class PubMedConnector(BaseConnector):
 
     # ── Collect PMIDs via paginated esearch ───────────────────────────────────
 
-    async def _collect_pmids(self, query: str, max_records: int) -> List[str]:
+    async def _collect_pmids(
+        self,
+        query: str,
+        max_records: int,
+        since_days: Optional[int] = None,
+    ) -> List[str]:
         """
         Run esearch and paginate through all result pages to collect up to
         max_records PMIDs. Retries with exponential backoff on 429 responses.
+
+        since_days: if set, adds reldate + datetype=edat to restrict results
+          to records indexed by PubMed in the last N days.  This is how we
+          discover new papers during scheduled runs without re-fetching the
+          entire history every time.
         """
         all_pmids: List[str] = []
         page_size = 100
@@ -103,8 +124,14 @@ class PubMedConnector(BaseConnector):
                     "term":     query,
                     "retmax":   min(page_size, max_records - len(all_pmids)),
                     "retstart": retstart,
-                    "sort":     "relevance",
+                    "sort":     "date",   # date sort for scheduled runs to surface newest first
                 }
+                # Date filter — scheduled runs only
+                if since_days:
+                    params["reldate"]  = str(since_days)
+                    params["datetype"] = "edat"   # Entrez Date = date added to PubMed index
+                else:
+                    params["sort"] = "relevance"  # full-history runs stay relevance-sorted
                 # Retry loop for 429 / transient errors
                 last_error = None
                 for attempt in range(max_retries):

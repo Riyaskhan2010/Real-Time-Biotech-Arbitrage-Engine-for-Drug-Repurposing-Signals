@@ -54,18 +54,37 @@ class ClinicalTrialsConnector(BaseConnector):
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
-    async def fetch(self, query: str, max_records: int = 50) -> List[NormalizedRecord]:
+    async def fetch(
+        self,
+        query: str,
+        max_records: int = 50,
+        since_days: Optional[int] = None,
+    ) -> List[NormalizedRecord]:
         """
         Search ClinicalTrials.gov for studies matching `query`.
 
-        Paginates using nextPageToken until max_records is reached or
-        all results are exhausted.
+        since_days: when set (scheduled runs), adds a lastUpdatePostDate filter
+          via the advanced filter syntax so only studies updated in the last
+          N days are returned. Safety buffer: window = max(since_days * 2, 7).
+          ClinicalTrials.gov v2 API supports filter.advanced for date ranges.
+          When None (manual), no date filter — full history.
+
+        Paginates using nextPageToken until max_records is reached.
         """
         if not query or not query.strip():
             return []
 
         records: List[NormalizedRecord] = []
         page_token: Optional[str] = None
+
+        # Build optional date filter
+        advanced_filter: Optional[str] = None
+        if since_days:
+            from datetime import date as _date, timedelta as _td
+            window    = max(since_days * 2, 7)
+            since_str = (_date.today() - _td(days=window)).strftime("%Y-%m-%d")
+            today_str = _date.today().strftime("%Y-%m-%d")
+            advanced_filter = f"AREA[LastUpdatePostDate]RANGE[{since_str},{today_str}]"
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -78,6 +97,8 @@ class ClinicalTrialsConnector(BaseConnector):
                     }
                     if page_token:
                         params["pageToken"] = page_token
+                    if advanced_filter:
+                        params["filter.advanced"] = advanced_filter
 
                     try:
                         r = await client.get(CT_BASE, params=params)

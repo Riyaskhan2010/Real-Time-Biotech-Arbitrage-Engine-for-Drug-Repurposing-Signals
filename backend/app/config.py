@@ -87,6 +87,22 @@ class Settings(BaseSettings):
         "metformin cancer,sildenafil pulmonary hypertension"
     )
 
+    # ── Scheduler ────────────────────────────────────────────────────────────
+    # How often the background scheduler triggers a full ingestion cycle.
+    #
+    # Default: 6 hours.
+    # Rationale:
+    #   - PubMed indexes new articles once per day (overnight batch).
+    #   - bioRxiv/medRxiv post preprints continuously but are a free public API.
+    #   - ClinicalTrials.gov updates its search index weekly.
+    #   - 6 hours = 4 runs/day → same-day discovery of new publications
+    #     without excessive API pressure on any of the 7 sources.
+    #   - Reduce to 1–2 hours only if NCBI_API_KEY is set (raises PubMed
+    #     rate limit from 3 req/s to 10 req/s).
+    #
+    # Set to 0 to disable the scheduler entirely (manual-only mode).
+    INGESTION_INTERVAL_HOURS: int = 6
+
     # ── Derived properties ───────────────────────────────────────────────────
 
     @property

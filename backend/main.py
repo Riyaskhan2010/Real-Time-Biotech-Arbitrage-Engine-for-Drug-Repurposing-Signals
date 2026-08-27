@@ -7,8 +7,9 @@ It does NOT diagnose patients, prescribe medicines, or provide medical treatment
 """
 import asyncio
 import logging
-import os
+import math
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,9 +27,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Verify database is reachable before doing anything else.
-    #    Server still starts even if DB is temporarily down — requests will
-    #    fail at the endpoint level, which is the correct behaviour.
+    # 1. Verify database is reachable.
     db_ok = verify_database_connection()
     if db_ok:
         db_type = "PostgreSQL" if "postgresql" in settings.DATABASE_URL else "SQLite"
@@ -39,7 +38,7 @@ async def lifespan(app: FastAPI):
             "Application will start but all DB-dependent endpoints will fail."
         )
 
-    # 2. Create / migrate schema (idempotent — safe to run on every restart).
+    # 2. Create / migrate schema (idempotent — safe on every restart).
     Base.metadata.create_all(bind=engine)
     _apply_sqlite_migrations()
 
@@ -49,11 +48,13 @@ async def lifespan(app: FastAPI):
             "[BioArbitrage] ELSEVIER_API_KEY not set — Elsevier/Scopus source disabled."
         )
 
-    # 4. Seed or skip — controlled by ENABLE_DEMO_SEED / APP_ENV.
-    #    Production (APP_ENV=production or ENABLE_DEMO_SEED=false):
-    #      → only create user accounts, no demo research data.
-    #    Development (default):
-    #      → full demo seed when DB is empty.
+    # 4. Stale-run cleanup.
+    #    On restart, any IngestionRun with status="running" is an orphan left
+    #    by a previous crash.  Mark them as failed so the lock is cleared
+    #    immediately rather than waiting for the 30-minute timeout.
+    _cleanup_stale_runs()
+
+    # 5. Seed or skip.
     from app.database import SessionLocal
     from app.models.user import User
 
@@ -77,32 +78,173 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    # 5. Production startup ingestion.
-    #    Runs as a background task so the server is immediately responsive.
-    #    Skipped automatically when live evidence already exists.
+    # 6. Production startup: first-time ingestion (empty DB only).
     if settings.APP_ENV == "production":
         asyncio.create_task(_run_startup_ingestion())
 
+    # 7. Background periodic scheduler.
+    #    Runs in all environments when INGESTION_INTERVAL_HOURS > 0.
+    #    In development the interval still applies — set to 0 in .env to disable.
+    scheduler_task = None
+    if settings.INGESTION_INTERVAL_HOURS > 0:
+        scheduler_task = asyncio.create_task(_run_periodic_ingestion())
+        logger.info(
+            "[BioArbitrage] Scheduler started — ingestion every %d hour(s). "
+            "Set INGESTION_INTERVAL_HOURS=0 to disable.",
+            settings.INGESTION_INTERVAL_HOURS,
+        )
+    else:
+        logger.info(
+            "[BioArbitrage] Scheduler disabled (INGESTION_INTERVAL_HOURS=0). "
+            "Use POST /api/ingestion/run to trigger ingestion manually."
+        )
+
+    # ── yield: FastAPI serves requests here ──────────────────────────────────
     yield
-    # (shutdown — nothing to clean up currently)
+
+    # ── Shutdown: cancel the scheduler cleanly ────────────────────────────────
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("[BioArbitrage] Scheduler stopped.")
 
 
-# ── Production startup ingestion ──────────────────────────────────────────────
+# ── Stale-run cleanup ─────────────────────────────────────────────────────────
+
+def _cleanup_stale_runs() -> None:
+    """
+    On every startup, find IngestionRun rows stuck in status="running" and
+    mark them as failed.  These are orphans left by a previous process crash
+    (Python exception handling can't fire on SIGKILL / OOM / container restart).
+
+    Without this, the DB-backed lock (30-minute timeout) would block new runs
+    for up to 30 minutes after a crash restart.
+    """
+    from app.database import SessionLocal
+    from app.models.ingestion_run import IngestionRun
+
+    db = SessionLocal()
+    try:
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=1)
+        stale = db.query(IngestionRun).filter(
+            IngestionRun.status    == "running",
+            IngestionRun.started_at <= stale_cutoff,
+        ).all()
+        if stale:
+            for run in stale:
+                run.status      = "failed"
+                run.error       = "Process restarted — run was orphaned mid-execution."
+                run.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.warning(
+                "[BioArbitrage] Cleaned up %d orphaned ingestion run(s) from previous crash.",
+                len(stale),
+            )
+    except Exception as exc:
+        logger.warning("[BioArbitrage] Stale-run cleanup failed: %s", exc)
+    finally:
+        db.close()
+
+
+# ── Periodic background scheduler ────────────────────────────────────────────
+
+async def _run_periodic_ingestion() -> None:
+    """
+    Background task: run a full ingestion cycle every INGESTION_INTERVAL_HOURS.
+
+    Behaviour:
+      - Waits one full interval before the first scheduled run (the startup
+        ingestion in _run_startup_ingestion handles the initial population).
+      - Uses since_days = interval_hours * 2 (days) as the freshness window so
+        each connector only fetches records newer than the last run period,
+        with a 2× safety buffer to handle any failed previous cycle.
+      - Skips if another run (manual or scheduled) is already in progress
+        (DB-backed lock via _ingestion_is_running).
+      - Catches asyncio.CancelledError cleanly on shutdown.
+      - Never crashes on source failures — all errors are logged and the loop
+        continues after the next sleep interval.
+
+    This coroutine is started from lifespan() and cancelled on shutdown.
+    """
+    from app.database import SessionLocal
+    from app.api.ingestion import _ingestion_is_running
+    from app.services.ingestion_service import ingestion_service
+
+    interval_seconds = settings.INGESTION_INTERVAL_HOURS * 3600
+    # Convert interval to days for the since_days freshness window (2× buffer)
+    since_days = max(math.ceil(settings.INGESTION_INTERVAL_HOURS / 12), 1)
+    # e.g. 6 hours → since_days=1 (fetches last 2 days with 2× buffer in connectors)
+    # e.g. 24 hours → since_days=2
+
+    logger.info(
+        "[Scheduler] First run in %d hour(s). "
+        "Subsequent runs every %d hour(s) with a %d-day freshness window.",
+        settings.INGESTION_INTERVAL_HOURS,
+        settings.INGESTION_INTERVAL_HOURS,
+        since_days,
+    )
+
+    # Wait the full interval before the first scheduled run.
+    # The startup ingestion (_run_startup_ingestion) handles first-time population.
+    try:
+        await asyncio.sleep(interval_seconds)
+    except asyncio.CancelledError:
+        return   # shutdown before first run — exit cleanly
+
+    while True:
+        db = SessionLocal()
+        try:
+            if _ingestion_is_running(db):
+                logger.info(
+                    "[Scheduler] Skipping scheduled run — another ingestion is in progress."
+                )
+            else:
+                logger.info(
+                    "[Scheduler] Starting scheduled ingestion (since_days=%d).", since_days
+                )
+                run = await ingestion_service.run(db, since_days=since_days)
+                logger.info(
+                    "[Scheduler] Scheduled run complete — "
+                    "status=%s, new=%d, signals_updated=%d, novel=%d",
+                    run.status, run.total_new, run.signals_updated, run.signals_created,
+                )
+        except asyncio.CancelledError:
+            # Shutdown signal received while a run was in progress — exit cleanly.
+            # The in-progress run will be cleaned up as stale on next startup.
+            logger.info("[Scheduler] Shutdown signal received — stopping scheduler.")
+            return
+        except Exception as exc:
+            # Any other error: log and continue after the next sleep.
+            # This ensures a source outage or transient DB error never kills the loop.
+            logger.warning("[Scheduler] Scheduled run failed: %s", exc)
+        finally:
+            db.close()
+
+        # Wait for next interval — catches CancelledError for clean shutdown.
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.info("[Scheduler] Shutdown signal received during sleep — stopping.")
+            return
+
+
+# ── Production startup ingestion (first deploy only) ─────────────────────────
 
 async def _run_startup_ingestion() -> None:
     """
-    Background task: run one real ingestion pass on first production deploy.
+    One-shot background task: run a full ingestion pass on the very first
+    production deploy (when the database has no live evidence yet).
 
     Guards:
       - Only fires when APP_ENV = production.
-      - Checks live evidence count before running — skips if data already exists.
-      - Small delay so the HTTP server is fully up before heavy I/O starts.
-      - Never raises — all errors are logged and ignored.
-
-    Sources used: PubMed, bioRxiv, medRxiv, ClinicalTrials.gov, Europe PMC,
-                  UniProt, and Elsevier (if ELSEVIER_API_KEY is set).
+      - Skips immediately if any live evidence already exists.
+      - Runs without since_days (full-history) since this is initial population.
+      - 8-second delay lets the HTTP server finish binding.
     """
-    await asyncio.sleep(8)          # let the server finish binding
+    await asyncio.sleep(8)
 
     from app.database import SessionLocal
     from app.models.evidence import Evidence
@@ -114,35 +256,25 @@ async def _run_startup_ingestion() -> None:
         if live_count > 0:
             logger.info(
                 "[BioArbitrage] Startup ingestion skipped — %d live evidence records "
-                "already exist in the database.", live_count
+                "already exist.", live_count,
             )
             return
 
-        source_list = settings.enabled_sources_list
-        elsevier_note = (
-            ", Elsevier/Scopus" if settings.ELSEVIER_API_KEY else
-            " (Elsevier skipped — ELSEVIER_API_KEY not set)"
-        )
         logger.info(
-            "[BioArbitrage] Production startup: no live evidence found. "
-            "Running ingestion from: %s%s",
-            ", ".join(s for s in source_list if s != "elsevier"),
-            elsevier_note,
+            "[BioArbitrage] Production first-deploy: no live evidence found — "
+            "running full startup ingestion (no date filter)."
         )
-
-        run = await ingestion_service.run(db)
+        run = await ingestion_service.run(db)   # since_days=None → full history
         logger.info(
             "[BioArbitrage] Startup ingestion complete — "
-            "status=%s, new_records=%d, signals_updated=%d, novel_signals=%d",
+            "status=%s, new=%d, signals_updated=%d, novel=%d",
             run.status, run.total_new, run.signals_updated, run.signals_created,
         )
-        if run.summary:
-            logger.info("[BioArbitrage] Summary: %s", run.summary)
-
     except Exception as exc:
         logger.warning(
             "[BioArbitrage] Startup ingestion failed: %s. "
-            "Use POST /api/ingestion/run to retry manually.", exc
+            "The scheduler will retry in %d hour(s).",
+            exc, settings.INGESTION_INTERVAL_HOURS,
         )
     finally:
         db.close()
@@ -151,10 +283,7 @@ async def _run_startup_ingestion() -> None:
 # ── SQLite schema migrations ──────────────────────────────────────────────────
 
 def _apply_sqlite_migrations() -> None:
-    """
-    Idempotent ALTER TABLE additions for SQLite.
-    PostgreSQL handles this through create_all / proper migrations.
-    """
+    """Idempotent ALTER TABLE additions for SQLite only."""
     if "sqlite" not in settings.DATABASE_URL:
         return
     with engine.connect() as conn:
@@ -210,11 +339,12 @@ app.include_router(public_api.router)
 @app.get("/")
 def root():
     return {
-        "name":    "BioArbitrage API",
-        "version": "1.0.0",
-        "env":     settings.APP_ENV,
-        "status":  "running",
-        "docs":    "/docs",
+        "name":              "BioArbitrage API",
+        "version":           "1.0.0",
+        "env":               settings.APP_ENV,
+        "status":            "running",
+        "docs":              "/docs",
+        "scheduler_hours":   settings.INGESTION_INTERVAL_HOURS,
         "disclaimer": (
             "Research decision-support tool only. "
             "Not for clinical use, diagnosis, or treatment recommendations."
@@ -228,13 +358,14 @@ def health():
     Health endpoint — confirms application and database availability.
     Does NOT expose credentials or secrets.
     """
-    db_ok = verify_database_connection()
+    db_ok   = verify_database_connection()
     db_type = "postgresql" if "postgresql" in settings.DATABASE_URL else "sqlite"
     return {
-        "status":        "healthy" if db_ok else "degraded",
-        "database":      "connected" if db_ok else "unreachable",
-        "database_type": db_type,
-        "env":           settings.APP_ENV,
-        "demo_seeding":  settings.demo_seeding_enabled,
-        "sources":       settings.enabled_sources_list,
+        "status":           "healthy" if db_ok else "degraded",
+        "database":         "connected" if db_ok else "unreachable",
+        "database_type":    db_type,
+        "env":              settings.APP_ENV,
+        "demo_seeding":     settings.demo_seeding_enabled,
+        "sources":          settings.enabled_sources_list,
+        "scheduler_hours":  settings.INGESTION_INTERVAL_HOURS,
     }

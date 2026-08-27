@@ -68,16 +68,7 @@ from app.models.research_source import ResearchSource
 from app.models.signal import RepurposingSignal
 from app.models.user import User
 from app.services.ai_service import ai_service
-from app.services.connectors import (
-    BioRxivConnector,
-    ClinicalTrialsConnector,
-    ElsevierConnector,
-    EuropePMCConnector,
-    MedRxivConnector,
-    NormalizedRecord,
-    PubMedConnector,
-    UniProtConnector,
-)
+from app.services.connectors import get_registry, NormalizedRecord
 
 logger = logging.getLogger(__name__)
 
@@ -98,16 +89,15 @@ class IngestionService:
     """
 
     def _build_connectors(self) -> dict:
-        timeout = settings.INGESTION_REQUEST_TIMEOUT
-        return {
-            "pubmed":         PubMedConnector(timeout=timeout),
-            "biorxiv":        BioRxivConnector(timeout=timeout),
-            "medrxiv":        MedRxivConnector(timeout=timeout),
-            "clinicaltrials": ClinicalTrialsConnector(timeout=timeout),
-            "elsevier":       ElsevierConnector(timeout=timeout),
-            "europepmc":      EuropePMCConnector(timeout=timeout),
-            "uniprot":        UniProtConnector(timeout=timeout),
-        }
+        """
+        Build connector instances from the central registry.
+        New connectors are discovered automatically — no changes needed here.
+        To add a new source: register it in connectors/__init__.py and add its
+        name to INGESTION_ENABLED_SOURCES in .env / Render Dashboard.
+        """
+        timeout  = settings.INGESTION_REQUEST_TIMEOUT
+        registry = get_registry()
+        return {name: cls(timeout=timeout) for name, cls in registry.items()}
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -115,13 +105,20 @@ class IngestionService:
         self,
         db: Session,
         query_terms: Optional[List[str]] = None,
+        since_days: Optional[int] = None,
     ) -> IngestionRun:
         """
         Execute a full ingestion run.
 
         query_terms: optional override — if provided, only these terms are
-        searched (used for on-demand drug+disease queries from the UI).
-        Falls back to settings.query_terms_list when None.
+          searched (used for on-demand drug+disease queries from the UI).
+          Falls back to settings.query_terms_list when None.
+
+        since_days: optional freshness window — when set, each connector uses
+          its date filter to fetch only records newer than this many days.
+          The scheduler sets this automatically (2× interval hours converted
+          to days). Manual runs and first-time runs leave it as None so the
+          full history is queried.
 
         Returns an IngestionRun with full results.
         Never raises — all errors are captured in the run record.
@@ -134,7 +131,9 @@ class IngestionService:
         effective_queries = query_terms if query_terms is not None else settings.query_terms_list
 
         try:
-            source_results = await self._run_all_sources(db, run.id, effective_queries)
+            source_results = await self._run_all_sources(
+                db, run.id, effective_queries, since_days=since_days
+            )
             # Rescore ALL signals so stored scores reflect current evidence
             self._rescore_all_signals(db)
             self._finish_run(db, run, source_results)
@@ -155,6 +154,7 @@ class IngestionService:
         db: Session,
         run_id: int,
         queries: List[str],
+        since_days: Optional[int] = None,
     ) -> List[dict]:
         """Run all enabled sources concurrently (with per-source error isolation)."""
         enabled    = settings.enabled_sources_list
@@ -168,7 +168,10 @@ class IngestionService:
                 continue
             for query in queries:
                 tasks.append(
-                    self._run_single_source(db, connector, source_name, query, max_recs)
+                    self._run_single_source(
+                        db, connector, source_name, query, max_recs,
+                        since_days=since_days,
+                    )
                 )
 
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -218,6 +221,7 @@ class IngestionService:
         source_name: str,
         query: str,
         max_recs: int,
+        since_days: Optional[int] = None,
     ) -> dict:
         t0 = time.monotonic()
         result = {
@@ -237,7 +241,16 @@ class IngestionService:
             return result
 
         try:
-            records = await connector.fetch(query=query, max_records=max_recs)
+            # Pass since_days only if the connector's fetch() accepts it.
+            # All built-in connectors do; future connectors may not yet.
+            import inspect
+            fetch_sig = inspect.signature(connector.fetch)
+            if "since_days" in fetch_sig.parameters:
+                records = await connector.fetch(
+                    query=query, max_records=max_recs, since_days=since_days
+                )
+            else:
+                records = await connector.fetch(query=query, max_records=max_recs)
             result["records_fetched"] = len(records)
 
             if not records:

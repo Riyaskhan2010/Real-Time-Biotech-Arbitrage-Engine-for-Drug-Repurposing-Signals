@@ -90,22 +90,38 @@ class EuropePMCConnector(BaseConnector):
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
-    async def fetch(self, query: str, max_records: int = 50) -> List[NormalizedRecord]:
+    async def fetch(
+        self,
+        query: str,
+        max_records: int = 50,
+        since_days: Optional[int] = None,
+    ) -> List[NormalizedRecord]:
         """
         Search Europe PMC for articles matching `query`.
 
-        Paginates through all available results using nextCursorMark until
-        max_records is reached or the API returns no further pages.
+        since_days: when set (scheduled runs), appends a FIRST_PDATE date range
+          filter to the query so only records first published in the last N days
+          are returned. Safety buffer: window = max(since_days * 2, 7).
+          Supported by EuropePMC's Lucene query syntax natively.
+          When None (manual), no date filter — full history.
 
-        All metadata fields are extracted: PMID, PMCID, DOI, authors, journal,
-        abstract, keywords (from keywordList and MeSH), article type,
-        open-access status, and source URL.
+        Paginates through all available results using nextCursorMark.
         """
         if not query or not query.strip():
             return []
 
+        base_query = query.strip()
+
+        # Scheduled freshness filter
+        if since_days:
+            from datetime import date as _date, timedelta as _td
+            window     = max(since_days * 2, 7)
+            since_str  = (_date.today() - _td(days=window)).strftime("%Y-%m-%d")
+            today_str  = _date.today().strftime("%Y-%m-%d")
+            base_query = f"{base_query} FIRST_PDATE:[{since_str} TO {today_str}]"
+
         # sort_date:y appended in query string per v6 documentation
-        epmc_query = f"{query.strip()} sort_date:y"
+        epmc_query = f"{base_query} sort_date:y"
 
         records: List[NormalizedRecord] = []
         cursor_mark = "*"   # initial cursor
