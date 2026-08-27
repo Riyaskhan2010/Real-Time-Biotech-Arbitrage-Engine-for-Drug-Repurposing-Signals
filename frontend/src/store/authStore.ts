@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type { User } from '../types'
 import { authApi } from '../api'
-import client from '../api/client'
 
 interface AuthState {
   user: User | null
@@ -29,9 +28,11 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   /**
    * Validate the stored token against /api/auth/me on app startup.
-   * If the token is expired or invalid, clear it so the user is sent to login
-   * BEFORE the dashboard attempts to load protected data.
-   * This prevents the "Failed to load dashboard data" flash.
+   *
+   * Uses a raw fetch (not the axios client) so the response interceptor
+   * does NOT fire during this check. If the token is expired, we clean up
+   * here without triggering a page reload — the Layout/Router then redirects
+   * to /login cleanly via React state, not a full browser navigation.
    */
   initAuth: async () => {
     const token = localStorage.getItem('access_token')
@@ -40,14 +41,23 @@ export const useAuthStore = create<AuthState>((set) => ({
       return
     }
     try {
-      const { data } = await client.get<User>('/auth/me')
-      set({ user: data, isAuthenticated: true, isInitializing: false })
-      localStorage.setItem('user', JSON.stringify(data))
+      const res = await fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) {
+        const user: User = await res.json()
+        set({ user, isAuthenticated: true, isInitializing: false })
+        localStorage.setItem('user', JSON.stringify(user))
+      } else {
+        // Token invalid or expired — clear state, React Router will redirect
+        localStorage.removeItem('access_token')
+        localStorage.removeItem('user')
+        set({ user: null, token: null, isAuthenticated: false, isInitializing: false })
+      }
     } catch {
-      // Token invalid or expired — clean up silently
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
-      set({ user: null, token: null, isAuthenticated: false, isInitializing: false })
+      // Network error — assume token still valid to avoid false logout
+      // (e.g. backend temporarily down shouldn't log the user out)
+      set({ isInitializing: false })
     }
   },
 
