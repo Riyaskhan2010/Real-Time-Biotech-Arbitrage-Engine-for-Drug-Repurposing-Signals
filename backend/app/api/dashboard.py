@@ -64,13 +64,14 @@ def get_dashboard(
         RepurposingSignal.status == "active",
     ).count()
 
-    # Recent updates = live records ingested in last 7 days
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    # Recent updates = live records ingested in last 30 days
+    # (Using 30 days so recently-ingested records remain visible for the full month)
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
     recent_live = (
         db.query(ResearchSource)
         .filter(
             ResearchSource.is_demo_data == False,
-            ResearchSource.ingested_at  >= seven_days_ago,
+            ResearchSource.ingested_at  >= thirty_days_ago,
         )
         .count()
     )

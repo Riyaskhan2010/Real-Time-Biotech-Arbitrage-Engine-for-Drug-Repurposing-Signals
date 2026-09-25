@@ -55,12 +55,15 @@ class _RxivConnector(BaseConnector):
         """
         Check API reachability. Uses a 7-day window — just verifies HTTP 200.
         An empty collection is acceptable; we only need to know the endpoint responds.
+        Uses a short connect+read timeout so unreachable servers fail fast.
         """
         end   = date.today()
         start = end - timedelta(days=7)
         url   = f"{BIORXIV_BASE}/{self._SERVER}/{start}/{end}/0/json"
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
+            # connect_timeout=5 ensures we fail fast if the server is unreachable
+            timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.get(url)
                 if r.status_code != 200:
                     return False

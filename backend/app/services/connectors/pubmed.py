@@ -56,7 +56,8 @@ class PubMedConnector(BaseConnector):
 
     async def check_connection(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.get(EINFO_URL, params={"retmode": "json"})
                 return r.status_code == 200
         except Exception:

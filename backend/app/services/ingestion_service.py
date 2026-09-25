@@ -75,9 +75,9 @@ logger = logging.getLogger(__name__)
 
 # ── Confidence thresholds ─────────────────────────────────────────────────────
 def _score_to_confidence(score: float) -> str:
-    if score >= 75:
+    if score >= 70:
         return "high"
-    if score >= 50:
+    if score >= 45:
         return "medium"
     return "low"
 
@@ -652,6 +652,7 @@ class IngestionService:
             signal.evidence_score   = new_score
             signal.source_count     = len(evidence_dicts)
             signal.confidence_level = _score_to_confidence(new_score)
+            signal.score_breakdown  = score_data   # keep stored breakdown in sync
             # Mark as live if there is any live evidence
             if live_count > 0:
                 signal.data_source = "live"
@@ -867,87 +868,84 @@ class IngestionService:
     # ── Source connection check ───────────────────────────────────────────────
 
     async def check_sources(self) -> List[dict]:
-        """Check connectivity for all configured sources. Used by Settings page."""
+        """
+        Check connectivity for all configured sources concurrently.
+        Each source gets a hard 10-second timeout so one unreachable source
+        cannot hang the entire Settings page.
+        """
         connectors = self._build_connectors()
-        results = []
-        for name, connector in connectors.items():
+        _CHECK_TIMEOUT = 10   # hard per-source limit regardless of global setting
+
+        async def _check_one(name: str, connector) -> dict:
             enabled = name in settings.enabled_sources_list
             if not enabled:
-                results.append({"source": name, "status": "disabled", "enabled": False})
-                continue
+                return {"source": name, "status": "disabled", "enabled": False}
 
             if name == "elsevier":
                 if not getattr(connector, "_is_configured", True):
-                    results.append({
+                    return {
                         "source":  name,
                         "status":  "not_configured",
                         "enabled": False,
-                        "error": (
-                            "ELSEVIER_API_KEY not set in backend/.env. "
-                            "Add your key and restart the backend."
-                        ),
-                    })
-                else:
-                    try:
-                        detail = await asyncio.wait_for(
-                            connector.check_connection_detail(),
-                            timeout=settings.INGESTION_REQUEST_TIMEOUT,
+                        "error":   "ELSEVIER_API_KEY not set in backend/.env.",
+                    }
+                try:
+                    detail = await asyncio.wait_for(
+                        connector.check_connection_detail(),
+                        timeout=_CHECK_TIMEOUT,
+                    )
+                    reason = detail.get("reason", "error")
+                    status_map = {
+                        "connected":      "connected",
+                        "invalid_key":    "invalid_key",
+                        "rate_limited":   "rate_limited",
+                        "timeout":        "timeout",
+                        "not_configured": "not_configured",
+                    }
+                    ui_status = status_map.get(reason, "error")
+                    error_msg = None
+                    if reason == "invalid_key":
+                        error_msg = (
+                            f"API returned HTTP {detail.get('status_code')}. "
+                            "Key may be invalid or missing entitlement."
                         )
-                        reason = detail.get("reason", "error")
-                        status_map = {
-                            "connected":      "connected",
-                            "invalid_key":    "invalid_key",
-                            "rate_limited":   "rate_limited",
-                            "timeout":        "timeout",
-                            "not_configured": "not_configured",
-                        }
-                        ui_status = status_map.get(reason, "error")
-                        error_msg = None
-                        if reason == "invalid_key":
-                            error_msg = (
-                                f"API returned HTTP {detail.get('status_code')}. "
-                                "Key may be invalid or missing entitlement."
-                            )
-                        elif reason == "rate_limited":
-                            error_msg = "Rate limited (HTTP 429). Try again shortly."
-                        elif reason not in ("connected", "not_configured"):
-                            error_msg = f"API error: {reason}"
-                        results.append({
-                            "source":  name,
-                            "status":  ui_status,
-                            "enabled": detail.get("ok", False),
-                            **({"error": error_msg} if error_msg else {}),
-                        })
-                    except asyncio.TimeoutError:
-                        results.append({
-                            "source": name, "status": "timeout", "enabled": False,
-                            "error": "Connection timed out.",
-                        })
-                    except Exception as e:
-                        results.append({
-                            "source": name, "status": "error", "enabled": False,
-                            "error": str(e),
-                        })
-                continue
+                    elif reason == "rate_limited":
+                        error_msg = "Rate limited (HTTP 429). Try again shortly."
+                    elif reason not in ("connected", "not_configured"):
+                        error_msg = f"API error: {reason}"
+                    return {
+                        "source":  name,
+                        "status":  ui_status,
+                        "enabled": detail.get("ok", False),
+                        **({"error": error_msg} if error_msg else {}),
+                    }
+                except asyncio.TimeoutError:
+                    return {"source": name, "status": "timeout", "enabled": False,
+                            "error": "Connection timed out after 10s."}
+                except Exception as e:
+                    return {"source": name, "status": "error", "enabled": False, "error": str(e)}
 
+            # All other sources
             try:
                 ok = await asyncio.wait_for(
                     connector.check_connection(),
-                    timeout=settings.INGESTION_REQUEST_TIMEOUT,
+                    timeout=_CHECK_TIMEOUT,
                 )
-                results.append({
-                    "source":  name,
-                    "status":  "connected" if ok else "error",
-                    "enabled": True,
-                })
+                return {"source": name, "status": "connected" if ok else "error", "enabled": True}
             except asyncio.TimeoutError:
-                results.append({"source": name, "status": "timeout", "enabled": True})
+                return {"source": name, "status": "timeout", "enabled": True,
+                        "error": "Connection timed out after 10s."}
             except Exception as e:
-                results.append({
-                    "source": name, "status": "error", "enabled": True, "error": str(e),
-                })
+                return {"source": name, "status": "error", "enabled": True, "error": str(e)}
 
-        return results
+        # Run all checks concurrently — one slow/unreachable source won't block others
+        tasks = [_check_one(name, connector) for name, connector in connectors.items()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [
+            r if isinstance(r, dict)
+            else {"source": "unknown", "status": "error", "error": str(r)}
+            for r in results
+        ]
 
 
 # ── Query hint parsing ────────────────────────────────────────────────────────

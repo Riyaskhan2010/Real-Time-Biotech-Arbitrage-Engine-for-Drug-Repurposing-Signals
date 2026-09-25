@@ -76,8 +76,9 @@ class EuropePMCConnector(BaseConnector):
                 "pageSize":   "1",
                 "resultType": "lite",
             }
+            timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
             async with httpx.AsyncClient(
-                timeout=min(self.timeout, 10),
+                timeout=timeout,
                 follow_redirects=True,
             ) as client:
                 r = await client.get(_BASE_URL, params=params, headers=_HEADERS)
