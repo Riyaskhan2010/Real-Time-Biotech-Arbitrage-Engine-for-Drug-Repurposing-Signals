@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import List
+from typing import List, Optional
 
 import httpx
 
@@ -53,30 +53,39 @@ class _RxivConnector(BaseConnector):
 
     async def check_connection(self) -> bool:
         """
-        Check API reachability. Uses a 7-day window.
-        Returns True only if the API responds with valid JSON (even an empty collection).
-        Returns False if the API returns an empty body — this indicates a server-side
-        outage (the biorxiv API has been observed returning HTTP 200 with empty body
-        when its backend is experiencing issues).
+        Check API reachability. Returns True if the API responds with valid JSON.
+
+        NOTE: The biorxiv/medrxiv API has been observed returning HTTP 200 with
+        empty body during server-side issues. This method returns False in that
+        case, and check_sources() maps it to "unavailable" (not "error") to
+        distinguish a reachable-but-empty server from a true connection failure.
         """
         end   = date.today()
-        start = end - timedelta(days=7)
+        start = end - timedelta(days=30)   # wider window = more likely to have records
         url   = f"{BIORXIV_BASE}/{self._SERVER}/{start}/{end}/0/json"
         try:
-            # Simple integer timeout — compatible with httpx 0.27+
             async with httpx.AsyncClient(timeout=8) as client:
                 r = await client.get(url)
                 if r.status_code != 200:
                     return False
-                # Empty body = API is up but returning no data (outage indicator)
                 if not r.text or not r.text.strip():
-                    logger.warning("[%s] check_connection: HTTP 200 but empty body (API outage?)",
+                    # Server is reachable but returning empty body — outage / maintenance
+                    logger.warning("[%s] check_connection: HTTP 200 but empty body — server-side issue",
                                    self._SERVER)
+                    # Return None-like signal via a sentinel — we use a custom attribute
+                    self._last_check_empty_body = True
                     return False
-                data = r.json()
+                import json
+                data = json.loads(r.text)
+                self._last_check_empty_body = False
                 return "collection" in data or "messages" in data
+        except json.JSONDecodeError as e:
+            logger.warning("[%s] check_connection: Invalid JSON response: %s", self._SERVER, e)
+            self._last_check_empty_body = False
+            return False
         except Exception as e:
             logger.warning("[%s] check_connection failed: %s", self._SERVER, e)
+            self._last_check_empty_body = False
             return False
 
     # ── Main fetch ────────────────────────────────────────────────────────────

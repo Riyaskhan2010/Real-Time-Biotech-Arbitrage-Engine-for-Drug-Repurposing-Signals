@@ -322,7 +322,7 @@ export interface ResearchMonitorData {
 
 export interface SourceStatusItem {
   source: string
-  status: 'connected' | 'error' | 'timeout' | 'disabled' | 'loading' | 'not_configured' | 'invalid_key' | 'rate_limited'
+  status: 'connected' | 'error' | 'timeout' | 'disabled' | 'loading' | 'not_configured' | 'invalid_key' | 'rate_limited' | 'unavailable'
   enabled: boolean
   error?: string | null
 }

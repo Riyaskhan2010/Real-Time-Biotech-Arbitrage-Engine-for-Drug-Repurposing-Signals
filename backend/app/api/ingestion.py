@@ -204,6 +204,85 @@ def is_running(
     return {"running": _ingestion_is_running(db)}
 
 
+@router.get("/diagnostics")
+def get_entity_diagnostics(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """
+    Diagnostic endpoint: returns zero-signal analysis for drugs and diseases.
+
+    For each entity with 0 active signals, reports why:
+      NO_LIVE_EVIDENCE          — no live evidence records reference this entity
+      NO_DRUG_DISEASE_PAIR      — entity has evidence but no drug+disease pair found
+      VALID_ZERO_SIGNAL         — entity exists, 0 evidence, 0 signals — expected
+
+    Use this to identify pipeline gaps without exposing research data.
+    Admin/researcher access only.
+    """
+    from app.models.drug import Drug
+    from app.models.disease import Disease
+    from app.models.signal import RepurposingSignal
+    from app.models.evidence import Evidence
+    from sqlalchemy import func
+
+    # Drugs with 0 signals
+    drug_diagnostics = []
+    for drug in db.query(Drug).all():
+        sig_count = db.query(RepurposingSignal).filter_by(drug_id=drug.id, status='active').count()
+        ev_count  = (db.query(Evidence)
+            .join(RepurposingSignal, Evidence.signal_id == RepurposingSignal.id)
+            .filter(RepurposingSignal.drug_id == drug.id, Evidence.is_demo_data == False)
+            .count())
+        if sig_count == 0:
+            reason = "NO_LIVE_EVIDENCE" if ev_count == 0 else "NO_DRUG_DISEASE_PAIR"
+            drug_diagnostics.append({
+                "entity_type": "drug",
+                "id": drug.id,
+                "name": drug.name,
+                "signal_count": 0,
+                "live_evidence_count": ev_count,
+                "reason": reason,
+            })
+
+    # Diseases with 0 signals
+    disease_diagnostics = []
+    for disease in db.query(Disease).all():
+        sig_count = db.query(RepurposingSignal).filter_by(disease_id=disease.id, status='active').count()
+        ev_count  = (db.query(Evidence)
+            .join(RepurposingSignal, Evidence.signal_id == RepurposingSignal.id)
+            .filter(RepurposingSignal.disease_id == disease.id, Evidence.is_demo_data == False)
+            .count())
+        if sig_count == 0:
+            reason = "NO_LIVE_EVIDENCE" if ev_count == 0 else "NO_DRUG_DISEASE_PAIR"
+            disease_diagnostics.append({
+                "entity_type": "disease",
+                "id": disease.id,
+                "name": disease.name,
+                "signal_count": 0,
+                "live_evidence_count": ev_count,
+                "reason": reason,
+            })
+
+    total_drugs     = db.query(Drug).count()
+    total_diseases  = db.query(Disease).count()
+    active_signals  = db.query(RepurposingSignal).filter_by(status='active').count()
+
+    return {
+        "summary": {
+            "total_drugs":              total_drugs,
+            "drugs_with_zero_signals":  len(drug_diagnostics),
+            "drugs_with_signals":       total_drugs - len(drug_diagnostics),
+            "total_diseases":           total_diseases,
+            "diseases_with_zero_signals": len(disease_diagnostics),
+            "diseases_with_signals":    total_diseases - len(disease_diagnostics),
+            "active_signals":           active_signals,
+        },
+        "zero_signal_drugs":    drug_diagnostics[:50],    # limit for API response size
+        "zero_signal_diseases": disease_diagnostics[:50],
+    }
+
+
 # ── Query builder ─────────────────────────────────────────────────────────────
 
 def _build_search_queries(drug: str, disease: str, extra: List[str]) -> List[str]:

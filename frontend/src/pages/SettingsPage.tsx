@@ -26,6 +26,7 @@ const STATUS_META: Record<string, { label: string; icon: typeof CheckCircle2; ic
   connected:      { label: 'Connected',       icon: CheckCircle2, iconCls: 'text-emerald-600', textCls: 'text-emerald-700' },
   error:          { label: 'Error',           icon: XCircle,      iconCls: 'text-red-500',     textCls: 'text-red-700'     },
   timeout:        { label: 'Timeout',         icon: Clock,        iconCls: 'text-amber-600',   textCls: 'text-amber-700'   },
+  unavailable:    { label: 'Unavailable',     icon: Clock,        iconCls: 'text-orange-500',  textCls: 'text-orange-700'  },
   disabled:       { label: 'Disabled',        icon: MinusCircle,  iconCls: 'text-slate-400',   textCls: 'text-slate-500'   },
   not_configured: { label: 'Not Configured',  icon: MinusCircle,  iconCls: 'text-slate-400',   textCls: 'text-slate-600'   },
   invalid_key:    { label: 'Invalid API Key', icon: XCircle,      iconCls: 'text-red-500',     textCls: 'text-red-700'     },
@@ -174,6 +175,7 @@ export function SettingsPage() {
 
   const allConnected = sources.length > 0 && sources.every(s => s.status === 'connected')
   const anyError     = sources.some(s => s.status === 'error' || s.status === 'timeout' || s.status === 'invalid_key')
+  const anyUnavailable = sources.some(s => s.status === 'unavailable')
 
   // Use override profile; fall back to auth store values if present
   const profile = {
@@ -246,6 +248,12 @@ export function SettingsPage() {
             <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[12px] font-medium">
               <XCircle size={13} aria-hidden="true" />
               Some sources unavailable
+            </div>
+          )}
+          {anyUnavailable && !anyError && !allConnected && (
+            <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg bg-orange-50 border border-orange-200 text-orange-800 text-[12px]">
+              <Clock size={13} aria-hidden="true" />
+              <span><strong>bioRxiv/medRxiv</strong> — API server is reachable but returning no data currently (server-side issue). Other sources are fully operational.</span>
             </div>
           )}
 

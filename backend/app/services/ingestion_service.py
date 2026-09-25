@@ -1024,12 +1024,28 @@ class IngestionService:
 
             # All other sources
             try:
+                # Reset the empty-body sentinel before checking
+                if hasattr(connector, '_last_check_empty_body'):
+                    connector._last_check_empty_body = False
                 ok = await asyncio.wait_for(
                     connector.check_connection(),
                     timeout=_CHECK_TIMEOUT,
                 )
-                return {"source": name, "status": "connected" if ok else "error", "enabled": True,
-                        **({"error": "API returned empty or invalid response (server-side outage?)"} if not ok else {})}
+                if ok:
+                    return {"source": name, "status": "connected", "enabled": True}
+                empty_body = getattr(connector, '_last_check_empty_body', False)
+                if empty_body:
+                    return {
+                        "source": name,
+                        "status": "unavailable",
+                        "enabled": True,
+                        "error": (
+                            "API server is reachable but returning no data currently. "
+                            "This is a server-side issue — the source will reconnect automatically."
+                        ),
+                    }
+                return {"source": name, "status": "error", "enabled": True,
+                        "error": "API returned empty or invalid response."}
             except asyncio.TimeoutError:
                 return {"source": name, "status": "timeout", "enabled": True,
                         "error": "Connection timed out after 10s."}
