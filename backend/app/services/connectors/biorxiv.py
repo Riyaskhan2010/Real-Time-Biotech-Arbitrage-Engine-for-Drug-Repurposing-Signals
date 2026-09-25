@@ -2,27 +2,33 @@
 bioRxiv and medRxiv connectors using the official bioRxiv/medRxiv REST API.
 
 API docs: https://api.biorxiv.org/
-Endpoints:
-  Date-range:   https://api.biorxiv.org/details/{server}/{interval}/{cursor}/json
-  DOI lookup:   https://api.biorxiv.org/details/{server}/{doi}/na/json
 
-No API key required — completely open and free.
+Two endpoints are supported, with automatic fallback:
 
-RETRIEVAL STRATEGY:
-  The bioRxiv/medRxiv API does not support full-text keyword search directly.
-  It returns articles in date-window slices. We use a sliding 90-day window
-  (configurable) and filter results by keyword relevance locally.
+PRIMARY — /details/{server}/{start}/{end}/{cursor}/json
+  Returns preprints in a date window.
+  Has been observed returning HTTP 200 with empty body during server issues.
 
-  For thorough retrieval we paginate through each window's pages (cursor-based).
-  The API returns up to 100 records per page; we page until exhausted or
-  max_records is reached.
+FALLBACK — /pubs/{server}/{start}/{end}/{cursor}/json
+  Returns preprints that have been published in journals within the date range.
+  Different field schema (preprint_doi, preprint_title, etc.).
+  Has been confirmed working even when /details returns empty.
 
-  This removes the previous hard 14-day restriction — the window now extends
-  back as far as needed to accumulate max_records relevant results.
+The connector tries /details first. If it returns empty body it automatically
+falls back to /pubs. If both return empty, status = "unavailable" (not "error").
+
+IMPORTANT:
+  - Never fabricates records.
+  - Never marks Connected unless a real valid JSON response is received.
+  - Preserves existing stored records during outages.
+  - Retries with exponential backoff on transient errors (timeout, 5xx).
+  - Respects API pagination (cursor-based).
+  - Deduplication is handled by the ingestion pipeline (source_id = DOI).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import date, timedelta
 from typing import List, Optional
@@ -33,60 +39,138 @@ from app.services.connectors.base import BaseConnector, NormalizedRecord
 
 logger = logging.getLogger(__name__)
 
-BIORXIV_BASE = "https://api.biorxiv.org/details"
+# Official API base URLs
+_DETAILS_BASE = "https://api.biorxiv.org/details"
+_PUBS_BASE    = "https://api.biorxiv.org/pubs"
 
-# Sliding window size per API call; multiple windows are used to hit max_records
-_WINDOW_DAYS = 90
-_PAGE_SIZE   = 100   # max the API allows per page
+_WINDOW_DAYS  = 90    # sliding window per request
+_PAGE_SIZE    = 100   # max records per page (API limit)
+_MAX_RETRIES  = 3     # max retries per request
+_RETRY_SLEEP  = 1.5   # base seconds (multiplied by attempt number)
+
+
+def _parse_json_safe(text: str) -> Optional[dict]:
+    """Return parsed JSON dict or None on any failure. Never raises."""
+    if not text or not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _is_valid_rxiv_response(data: Optional[dict]) -> bool:
+    """Return True only when data is a dict with 'collection' or 'messages' key."""
+    if not isinstance(data, dict):
+        return False
+    return "collection" in data or "messages" in data
 
 
 class _RxivConnector(BaseConnector):
-    """Shared logic for bioRxiv and medRxiv."""
+    """
+    Shared logic for bioRxiv and medRxiv.
+
+    Tries /details first, falls back to /pubs automatically.
+    Uses instance attribute _last_check_empty_body so check_sources()
+    can distinguish 'empty body' (unavailable) from hard errors.
+    """
 
     SOURCE_NAME: str = "biorxiv"
     _SERVER:     str = "biorxiv"
 
     def __init__(self, timeout: int = 20):
         super().__init__(timeout)
+        self._last_check_empty_body: bool = False
+        self._last_check_error: Optional[str] = None
 
     # ── Connectivity probe ────────────────────────────────────────────────────
 
     async def check_connection(self) -> bool:
         """
-        Check API reachability. Returns True if the API responds with valid JSON.
+        Probe both /details and /pubs for the last 30 days.
+        Returns True ONLY when a real valid JSON response is received.
 
-        NOTE: The biorxiv/medrxiv API has been observed returning HTTP 200 with
-        empty body during server-side issues. This method returns False in that
-        case, and check_sources() maps it to "unavailable" (not "error") to
-        distinguish a reachable-but-empty server from a true connection failure.
+        Sets self._last_check_empty_body = True when HTTP 200 with empty body
+        (server reachable but no data), so check_sources() can distinguish
+        'unavailable' from 'error'.
         """
+        self._last_check_empty_body = False
+        self._last_check_error      = None
         end   = date.today()
-        start = end - timedelta(days=30)   # wider window = more likely to have records
-        url   = f"{BIORXIV_BASE}/{self._SERVER}/{start}/{end}/0/json"
+        start = end - timedelta(days=30)
+
+        # Try /details first (canonical endpoint)
+        result = await self._try_details_probe(start, end)
+        if result == "connected":
+            return True
+        if result == "empty":
+            self._last_check_empty_body = True
+            # Fall through to /pubs before giving up
+
+        # Fall back to /pubs
+        result2 = await self._try_pubs_probe(start, end)
+        if result2 == "connected":
+            # /pubs is working — clear empty-body flag (we have a working endpoint)
+            self._last_check_empty_body = False
+            return True
+        if result2 == "empty":
+            self._last_check_empty_body = True
+            self._last_check_error = "Both /details and /pubs returned empty responses"
+            return False
+
+        # Hard error on both
+        self._last_check_error = f"/details: {result}, /pubs: {result2}"
+        return False
+
+    async def _try_details_probe(self, start: date, end: date) -> str:
+        """/details probe. Returns 'connected', 'empty', or error string."""
+        url = f"{_DETAILS_BASE}/{self._SERVER}/{start}/{end}/0/json"
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                r = await client.get(url)
-                if r.status_code != 200:
-                    return False
-                if not r.text or not r.text.strip():
-                    # Server is reachable but returning empty body — outage / maintenance
-                    logger.warning("[%s] check_connection: HTTP 200 but empty body — server-side issue",
-                                   self._SERVER)
-                    # Return None-like signal via a sentinel — we use a custom attribute
-                    self._last_check_empty_body = True
-                    return False
-                import json
-                data = json.loads(r.text)
-                self._last_check_empty_body = False
-                return "collection" in data or "messages" in data
-        except json.JSONDecodeError as e:
-            logger.warning("[%s] check_connection: Invalid JSON response: %s", self._SERVER, e)
-            self._last_check_empty_body = False
-            return False
+            async with httpx.AsyncClient(timeout=8) as c:
+                r = await c.get(url)
+            if r.status_code == 429:
+                return "rate_limited"
+            if r.status_code >= 500:
+                return f"http_{r.status_code}"
+            if r.status_code != 200:
+                return f"http_{r.status_code}"
+            data = _parse_json_safe(r.text)
+            if data is None:
+                return "empty"
+            if _is_valid_rxiv_response(data):
+                logger.info("[%s] /details probe: OK (collection=%d)",
+                            self._SERVER, len(data.get("collection", [])))
+                return "connected"
+            return "empty"
+        except httpx.TimeoutException:
+            return "timeout"
         except Exception as e:
-            logger.warning("[%s] check_connection failed: %s", self._SERVER, e)
-            self._last_check_empty_body = False
-            return False
+            return f"exception:{e}"
+
+    async def _try_pubs_probe(self, start: date, end: date) -> str:
+        """/pubs probe. Returns 'connected', 'empty', or error string."""
+        url = f"{_PUBS_BASE}/{self._SERVER}/{start}/{end}/0/json"
+        try:
+            async with httpx.AsyncClient(timeout=8) as c:
+                r = await c.get(url)
+            if r.status_code == 429:
+                return "rate_limited"
+            if r.status_code >= 500:
+                return f"http_{r.status_code}"
+            if r.status_code != 200:
+                return f"http_{r.status_code}"
+            data = _parse_json_safe(r.text)
+            if data is None:
+                return "empty"
+            if _is_valid_rxiv_response(data):
+                logger.info("[%s] /pubs probe: OK (collection=%d)",
+                            self._SERVER, len(data.get("collection", [])))
+                return "connected"
+            return "empty"
+        except httpx.TimeoutException:
+            return "timeout"
+        except Exception as e:
+            return f"exception:{e}"
 
     # ── Main fetch ────────────────────────────────────────────────────────────
 
@@ -99,10 +183,13 @@ class _RxivConnector(BaseConnector):
         """
         Fetch preprints matching `query` keywords.
 
-        since_days: when set (scheduled runs), restricts the date window to
-          the last N days so only genuinely new preprints are fetched.
-          Safety buffer: window = max(since_days * 2, 7) to handle failed runs.
-          When None (manual / first-time), slides back up to 2 years as before.
+        Strategy:
+          1. Try /details endpoint (primary).
+          2. If /details returns empty body, try /pubs (fallback).
+          3. Filter results locally by keyword match in title + abstract.
+          4. Paginate until max_records reached or window exhausted.
+
+        since_days: restricts the date window for scheduled runs.
         """
         if not query or not query.strip():
             return []
@@ -115,29 +202,53 @@ class _RxivConnector(BaseConnector):
         end_date = date.today()
 
         if since_days:
-            # Scheduled run: single tight window with 2× safety buffer
-            window  = max(since_days * 2, 7)
+            window     = max(since_days * 2, 7)
             start_date = end_date - timedelta(days=window)
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                results = await self._fetch_window(
+                results = await self._fetch_window_with_fallback(
                     client, start_date, end_date, keywords, need=max_records
                 )
         else:
-            # Manual / full-history: slide back up to 2 years
             max_windows = 8   # 8 × 90 days ≈ 2 years
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 for _ in range(max_windows):
                     if len(results) >= max_records:
                         break
                     start_date = end_date - timedelta(days=_WINDOW_DAYS)
-                    window_results = await self._fetch_window(
+                    batch = await self._fetch_window_with_fallback(
                         client, start_date, end_date, keywords,
                         need=max_records - len(results),
                     )
-                    results.extend(window_results)
+                    results.extend(batch)
                     end_date = start_date - timedelta(days=1)
 
         return results[:max_records]
+
+    async def _fetch_window_with_fallback(
+        self,
+        client: httpx.AsyncClient,
+        start: date,
+        end: date,
+        keywords: List[str],
+        need: int,
+    ) -> List[NormalizedRecord]:
+        """Try /details; if it returns empty body, fall back to /pubs."""
+        # Attempt /details
+        details_results = await self._fetch_window(
+            client, start, end, keywords, need, use_pubs=False
+        )
+        # /details returned something — use it
+        if details_results:
+            return details_results
+
+        # /details returned nothing. Was it an outage (empty body) or just no matches?
+        # Try /pubs as a data-availability check.
+        logger.info("[%s] /details returned 0 results for %s–%s, trying /pubs fallback",
+                    self._SERVER, start, end)
+        pubs_results = await self._fetch_window(
+            client, start, end, keywords, need, use_pubs=True
+        )
+        return pubs_results
 
     async def _fetch_window(
         self,
@@ -146,70 +257,90 @@ class _RxivConnector(BaseConnector):
         end: date,
         keywords: List[str],
         need: int,
+        use_pubs: bool = False,
     ) -> List[NormalizedRecord]:
         """
-        Fetch one date-window, paginating through all cursor pages until
-        we have enough relevant results or the window is exhausted.
-        Retries on RemoteProtocolError / ServerDisconnected (transient).
+        Fetch one date-window using either /details or /pubs, with pagination
+        and bounded retries with exponential backoff.
         """
         collected: List[NormalizedRecord] = []
         cursor = 0
-        max_retries = 3
+        base   = _PUBS_BASE if use_pubs else _DETAILS_BASE
 
         while len(collected) < need:
-            url = f"{BIORXIV_BASE}/{self._SERVER}/{start}/{end}/{cursor}/json"
+            url      = f"{base}/{self._SERVER}/{start}/{end}/{cursor}/json"
+            data     = None
             last_err = None
 
-            for attempt in range(max_retries):
+            for attempt in range(_MAX_RETRIES):
                 try:
                     r = await client.get(url)
-                    r.raise_for_status()
-                    # Handle empty body — biorxiv API returns HTTP 200 with empty body during outages
-                    if not r.text or not r.text.strip():
-                        logger.warning("[%s] Empty response body from %s (API outage?)",
-                                       self._SERVER, url[:70])
+                    if r.status_code == 429:
+                        wait = _RETRY_SLEEP * (2 ** attempt)
+                        logger.warning("[%s] 429 rate-limited, waiting %.1fs (attempt %d/%d)",
+                                       self._SERVER, wait, attempt + 1, _MAX_RETRIES)
+                        await asyncio.sleep(wait)
+                        last_err = "rate_limited"
+                        continue
+                    if r.status_code >= 500:
+                        wait = _RETRY_SLEEP * (2 ** attempt)
+                        logger.warning("[%s] HTTP %d, retrying in %.1fs (attempt %d/%d)",
+                                       self._SERVER, r.status_code, wait, attempt + 1, _MAX_RETRIES)
+                        await asyncio.sleep(wait)
+                        last_err = f"http_{r.status_code}"
+                        continue
+                    if r.status_code != 200:
+                        logger.warning("[%s] HTTP %d for %s", self._SERVER, r.status_code, url[:70])
+                        last_err = f"http_{r.status_code}"
+                        break
+                    parsed = _parse_json_safe(r.text)
+                    if parsed is None:
+                        # Empty body or invalid JSON — server-side issue; no retry useful
                         last_err = "empty_response"
-                        break   # no point retrying — empty body is a server-side issue
-                    data = r.json()
+                        break
+                    data     = parsed
                     last_err = None
                     break
                 except httpx.TimeoutException:
-                    logger.warning("[%s] timeout %s–%s cursor %d (attempt %d/%d)",
-                                   self._SERVER, start, end, cursor, attempt + 1, max_retries)
+                    wait = _RETRY_SLEEP * (attempt + 1)
+                    logger.warning("[%s] timeout cursor=%d attempt=%d/%d, retry in %.1fs",
+                                   self._SERVER, cursor, attempt + 1, _MAX_RETRIES, wait)
                     last_err = "timeout"
-                    await asyncio.sleep(1.5 * (attempt + 1))
+                    await asyncio.sleep(wait)
                 except httpx.RemoteProtocolError as e:
-                    logger.warning("[%s] RemoteProtocolError %s–%s cursor %d (attempt %d/%d): %s",
-                                   self._SERVER, start, end, cursor, attempt + 1, max_retries, e)
-                    last_err = "remote_protocol_error"
-                    await asyncio.sleep(2.0 * (attempt + 1))
+                    wait = _RETRY_SLEEP * (attempt + 1) * 1.5
+                    logger.warning("[%s] RemoteProtocolError cursor=%d attempt=%d/%d: %s",
+                                   self._SERVER, cursor, attempt + 1, _MAX_RETRIES, e)
+                    last_err = "remote_protocol"
+                    await asyncio.sleep(wait)
                 except Exception as e:
-                    logger.warning("[%s] error %s–%s cursor %d: %s",
-                                   self._SERVER, start, end, cursor, e)
+                    logger.warning("[%s] Unexpected error cursor=%d: %s", self._SERVER, cursor, e)
                     last_err = str(e)
                     break
 
-            if last_err:
-                logger.warning("[%s] giving up on window %s–%s cursor %d after %d attempts",
-                               self._SERVER, start, end, cursor, max_retries)
+            if data is None:
+                if last_err:
+                    logger.warning("[%s] Giving up on window %s–%s cursor=%d: %s",
+                                   self._SERVER, start, end, cursor, last_err)
                 break
 
             articles = data.get("collection", [])
             if not articles:
                 break
 
+            normalizer = self._normalize_pubs if use_pubs else self._normalize_details
             for art in articles:
-                rec = self._normalize(art)
+                rec = normalizer(art)
                 if rec and self._matches_keywords(rec, keywords):
                     collected.append(rec)
                     if len(collected) >= need:
                         break
 
             if len(articles) < _PAGE_SIZE:
-                break
+                break   # last page
 
             cursor += _PAGE_SIZE
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.3)   # rate-limit compliance
 
         return collected
 
@@ -219,23 +350,28 @@ class _RxivConnector(BaseConnector):
         """Return True if ANY keyword appears in title or abstract."""
         if not keywords:
             return True
-        text = ((rec.title or "") + " " + (rec.abstract or "")).lower()
+        text = ((rec.title or "") + " " + (rec.abstract or "") +
+                " " + (rec.journal or "")).lower()
         return any(kw in text for kw in keywords)
 
-    # ── Normalise one article dict ────────────────────────────────────────────
+    # ── Normalise /details record ─────────────────────────────────────────────
 
-    def _normalize(self, art: dict) -> NormalizedRecord | None:
+    def _normalize_details(self, art: dict) -> Optional[NormalizedRecord]:
+        """
+        Normalise a record from the /details endpoint.
+        Fields: doi, title, authors, abstract, date, server
+        """
         doi   = (art.get("doi") or "").strip() or None
         title = (art.get("title") or "").strip()
         if not title or not doi:
             return None
 
-        abstract   = self._truncate((art.get("abstract") or "").strip() or None)
-        pub_date   = self._safe_date(art.get("date") or art.get("published") or None)
+        abstract    = self._truncate((art.get("abstract") or "").strip() or None)
+        pub_date    = self._safe_date(art.get("date") or art.get("published") or None)
         authors_raw = art.get("authors") or ""
-        authors    = [a.strip() for a in str(authors_raw).split(";") if a.strip()][:10]
-        server_val = art.get("server") or self._SERVER
-        source_url = f"https://www.{server_val}.org/content/{doi}v1"
+        authors     = [a.strip() for a in str(authors_raw).split(";") if a.strip()][:10]
+        server_val  = art.get("server") or self._SERVER
+        source_url  = f"https://www.{server_val}.org/content/{doi}v1"
 
         return NormalizedRecord(
             source=self._SERVER,
@@ -247,6 +383,57 @@ class _RxivConnector(BaseConnector):
             publication_date=pub_date,
             authors=authors,
             journal=f"{server_val.capitalize()} [Preprint]",
+            evidence_type="preprint",
+            is_demo_data=False,
+        )
+
+    # ── Normalise /pubs record ────────────────────────────────────────────────
+
+    def _normalize_pubs(self, art: dict) -> Optional[NormalizedRecord]:
+        """
+        Normalise a record from the /pubs endpoint.
+        The /pubs endpoint has a different schema to /details:
+          preprint_doi, preprint_title, preprint_authors, preprint_abstract,
+          preprint_date, preprint_category, preprint_platform,
+          published_doi, published_journal, published_date
+        We use preprint_doi as the canonical source_id for deduplication
+        (same DOI as /details would return), so no double-counting occurs.
+        """
+        doi   = (art.get("preprint_doi") or "").strip() or None
+        title = (art.get("preprint_title") or "").strip()
+        if not title or not doi:
+            return None
+
+        abstract    = self._truncate((art.get("preprint_abstract") or "").strip() or None)
+        pub_date    = self._safe_date(
+            art.get("preprint_date") or art.get("published_date") or None
+        )
+        authors_raw = art.get("preprint_authors") or ""
+        authors     = [a.strip() for a in str(authors_raw).split(";") if a.strip()][:10]
+        platform    = (art.get("preprint_platform") or self._SERVER).lower()
+        source_url  = f"https://www.{platform}.org/content/{doi}v1"
+
+        # If the preprint has been published, record the journal
+        pub_journal = art.get("published_journal") or ""
+        pub_doi     = (art.get("published_doi") or "").strip() or None
+        category    = art.get("preprint_category") or ""
+        journal_str = (
+            f"{pub_journal} (published)" if pub_journal
+            else f"{platform.capitalize()} [Preprint]"
+        )
+        if category:
+            journal_str = f"{journal_str} · {category}"
+
+        return NormalizedRecord(
+            source=self._SERVER,
+            source_id=doi,           # preprint DOI — same as /details, ensures dedup
+            doi=doi,
+            source_url=source_url,
+            title=self._truncate(title, 495),
+            abstract=abstract,
+            publication_date=pub_date,
+            authors=authors,
+            journal=self._truncate(journal_str, 250),
             evidence_type="preprint",
             is_demo_data=False,
         )
