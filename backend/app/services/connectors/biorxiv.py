@@ -53,23 +53,30 @@ class _RxivConnector(BaseConnector):
 
     async def check_connection(self) -> bool:
         """
-        Check API reachability. Uses a 7-day window — just verifies HTTP 200.
-        An empty collection is acceptable; we only need to know the endpoint responds.
-        Uses a short connect+read timeout so unreachable servers fail fast.
+        Check API reachability. Uses a 7-day window.
+        Returns True only if the API responds with valid JSON (even an empty collection).
+        Returns False if the API returns an empty body — this indicates a server-side
+        outage (the biorxiv API has been observed returning HTTP 200 with empty body
+        when its backend is experiencing issues).
         """
         end   = date.today()
         start = end - timedelta(days=7)
         url   = f"{BIORXIV_BASE}/{self._SERVER}/{start}/{end}/0/json"
         try:
-            # connect_timeout=5 ensures we fail fast if the server is unreachable
-            timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            # Simple integer timeout — compatible with httpx 0.27+
+            async with httpx.AsyncClient(timeout=8) as client:
                 r = await client.get(url)
                 if r.status_code != 200:
                     return False
+                # Empty body = API is up but returning no data (outage indicator)
+                if not r.text or not r.text.strip():
+                    logger.warning("[%s] check_connection: HTTP 200 but empty body (API outage?)",
+                                   self._SERVER)
+                    return False
                 data = r.json()
                 return "collection" in data or "messages" in data
-        except Exception:
+        except Exception as e:
+            logger.warning("[%s] check_connection failed: %s", self._SERVER, e)
             return False
 
     # ── Main fetch ────────────────────────────────────────────────────────────
@@ -148,6 +155,12 @@ class _RxivConnector(BaseConnector):
                 try:
                     r = await client.get(url)
                     r.raise_for_status()
+                    # Handle empty body — biorxiv API returns HTTP 200 with empty body during outages
+                    if not r.text or not r.text.strip():
+                        logger.warning("[%s] Empty response body from %s (API outage?)",
+                                       self._SERVER, url[:70])
+                        last_err = "empty_response"
+                        break   # no point retrying — empty body is a server-side issue
                     data = r.json()
                     last_err = None
                     break

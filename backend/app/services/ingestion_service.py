@@ -931,7 +931,8 @@ class IngestionService:
                     connector.check_connection(),
                     timeout=_CHECK_TIMEOUT,
                 )
-                return {"source": name, "status": "connected" if ok else "error", "enabled": True}
+                return {"source": name, "status": "connected" if ok else "error", "enabled": True,
+                        **({"error": "API returned empty or invalid response (server-side outage?)"} if not ok else {})}
             except asyncio.TimeoutError:
                 return {"source": name, "status": "timeout", "enabled": True,
                         "error": "Connection timed out after 10s."}
