@@ -119,6 +119,20 @@ async def test_http_429():
     else:
         fail("HTTP 429", f"result={result} empty_body={c._last_check_empty_body}")
 
+async def test_probe_timeout_budget():
+    """
+    Each probe uses 5s timeout. Two sequential probes must complete in ≤ 15s.
+    Verify that the timeout values are correctly set in the connector.
+    """
+    import inspect
+    from app.services.connectors.biorxiv import BioRxivConnector
+    source = inspect.getsource(BioRxivConnector._try_details_probe)
+    source2 = inspect.getsource(BioRxivConnector._try_pubs_probe)
+    if "timeout=5" in source and "timeout=5" in source2:
+        ok("Both probes use timeout=5s (fits 2× within 15s outer limit) ✓")
+    else:
+        fail("Probe timeouts", "Expected timeout=5 in both _try_details_probe and _try_pubs_probe")
+
 async def test_http_500():
     """HTTP 500 → check_connection returns False."""
     from app.services.connectors.biorxiv import BioRxivConnector
@@ -314,6 +328,7 @@ async def main():
         test_empty_body_200,
         test_invalid_json,
         test_http_429,
+        test_probe_timeout_budget,
         test_http_500,
         test_pubs_fallback,
         test_details_normalization,

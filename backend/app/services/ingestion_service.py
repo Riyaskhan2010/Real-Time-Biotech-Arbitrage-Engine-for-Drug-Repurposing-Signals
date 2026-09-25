@@ -975,7 +975,7 @@ class IngestionService:
         """
         from datetime import datetime, timezone
         connectors = self._build_connectors()
-        _CHECK_TIMEOUT = 10   # hard per-source limit regardless of global setting
+        _CHECK_TIMEOUT = 15   # 15s allows two sequential 5s probes (details + pubs fallback)
         now_iso = datetime.now(timezone.utc).isoformat()
 
         async def _check_one(name: str, connector) -> dict:

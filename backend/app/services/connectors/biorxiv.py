@@ -90,6 +90,10 @@ class _RxivConnector(BaseConnector):
         Probe both /details and /pubs for the last 30 days.
         Returns True ONLY when a real valid JSON response is received.
 
+        Each probe uses a 5-second HTTP timeout. Two probes run sequentially
+        (/details first, /pubs as fallback), so the total time is at most ~10s
+        which fits within the 15-second outer asyncio.wait_for in check_sources().
+
         Sets self._last_check_empty_body = True when HTTP 200 with empty body
         (server reachable but no data), so check_sources() can distinguish
         'unavailable' from 'error'.
@@ -123,10 +127,12 @@ class _RxivConnector(BaseConnector):
         return False
 
     async def _try_details_probe(self, start: date, end: date) -> str:
-        """/details probe. Returns 'connected', 'empty', or error string."""
+        """/details probe. Returns 'connected', 'empty', or error string.
+        Uses 5s timeout so two sequential probes fit within the outer 15s limit.
+        """
         url = f"{_DETAILS_BASE}/{self._SERVER}/{start}/{end}/0/json"
         try:
-            async with httpx.AsyncClient(timeout=8) as c:
+            async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(url)
             if r.status_code == 429:
                 return "rate_limited"
@@ -148,10 +154,12 @@ class _RxivConnector(BaseConnector):
             return f"exception:{e}"
 
     async def _try_pubs_probe(self, start: date, end: date) -> str:
-        """/pubs probe. Returns 'connected', 'empty', or error string."""
+        """/pubs probe. Returns 'connected', 'empty', or error string.
+        Uses 5s timeout so two sequential probes fit within the outer 15s limit.
+        """
         url = f"{_PUBS_BASE}/{self._SERVER}/{start}/{end}/0/json"
         try:
-            async with httpx.AsyncClient(timeout=8) as c:
+            async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(url)
             if r.status_code == 429:
                 return "rate_limited"
