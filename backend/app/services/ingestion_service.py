@@ -964,14 +964,19 @@ class IngestionService:
 
     # ── Source connection check ───────────────────────────────────────────────
 
-    async def check_sources(self) -> List[dict]:
+    async def check_sources(self, db=None) -> List[dict]:
         """
         Check connectivity for all configured sources concurrently.
         Each source gets a hard 10-second timeout so one unreachable source
         cannot hang the entire Settings page.
+
+        db: optional SQLAlchemy Session — when provided, adds stored_records
+            and last_successful_sync from the database to each result.
         """
+        from datetime import datetime, timezone
         connectors = self._build_connectors()
         _CHECK_TIMEOUT = 10   # hard per-source limit regardless of global setting
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         async def _check_one(name: str, connector) -> dict:
             enabled = name in settings.enabled_sources_list
@@ -1054,12 +1059,37 @@ class IngestionService:
 
         # Run all checks concurrently — one slow/unreachable source won't block others
         tasks = [_check_one(name, connector) for name, connector in connectors.items()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
+        results = [
             r if isinstance(r, dict)
             else {"source": "unknown", "status": "error", "error": str(r)}
-            for r in results
+            for r in raw
         ]
+
+        # Enrich with DB stats (stored records + last successful sync) when DB available
+        if db is not None:
+            try:
+                from app.models.research_source import ResearchSource
+                from sqlalchemy import func
+                for item in results:
+                    src_name = item.get("source", "")
+                    # Stored live records for this source
+                    stored = (db.query(func.count(ResearchSource.id))
+                        .filter(ResearchSource.source_type == src_name,
+                                ResearchSource.is_demo_data == False)
+                        .scalar() or 0)
+                    item["stored_records"] = stored
+                    # Last successful ingest date
+                    last_row = (db.query(func.max(ResearchSource.ingested_at))
+                        .filter(ResearchSource.source_type == src_name,
+                                ResearchSource.is_demo_data == False)
+                        .scalar())
+                    item["last_successful_sync"] = last_row.isoformat() if last_row else None
+                    item["last_attempt"] = now_iso
+            except Exception as e:
+                logger.warning("[check_sources] DB enrichment failed: %s", e)
+
+        return results
 
 
 # ── Query hint parsing ────────────────────────────────────────────────────────

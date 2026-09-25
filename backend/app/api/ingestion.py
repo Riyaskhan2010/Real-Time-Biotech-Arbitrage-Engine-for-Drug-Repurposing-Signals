@@ -184,14 +184,16 @@ def get_latest_run(
 
 @router.get("/source-status", response_model=List[SourceStatusItem])
 async def get_source_status(
+    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
     """
     Probe connectivity for all configured research sources.
-    Returns status: connected | error | timeout | disabled for each.
+    Returns status: connected | unavailable | error | timeout | disabled for each.
+    Also includes stored_records and last_successful_sync from the database.
     Never exposes API keys or credentials.
     """
-    results = await ingestion_service.check_sources()
+    results = await ingestion_service.check_sources(db=db)
     return results
 
 

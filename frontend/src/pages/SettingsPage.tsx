@@ -36,27 +36,58 @@ const STATUS_META: Record<string, { label: string; icon: typeof CheckCircle2; ic
 
 // ── Source row ─────────────────────────────────────────────────────────────
 
-function SourceRow({ name, status, error }: {
-  name: string; status: string; error?: string | null
+function SourceRow({ name, status, error, stored_records, last_successful_sync, last_attempt }: {
+  name: string
+  status: string
+  error?: string | null
+  stored_records?: number | null
+  last_successful_sync?: string | null
+  last_attempt?: string | null
 }) {
   const meta = STATUS_META[status] ?? STATUS_META.error
   const Icon = meta.icon
 
+  const formatDate = (iso: string | null | undefined) => {
+    if (!iso) return null
+    try {
+      return new Date(iso).toLocaleString(undefined, {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      })
+    } catch { return null }
+  }
+
   return (
-    <div className="flex items-center gap-3 py-2.5 border-b border-slate-100 last:border-0">
-      <Icon
-        size={14}
-        className={clsx(meta.iconCls, status === 'loading' ? 'animate-spin' : '')}
-        aria-hidden="true"
-      />
-      <span className="flex-1 text-[13px] font-medium text-slate-800">{name}</span>
-      <span className={clsx('text-[12px] font-semibold', meta.textCls)}>
-        {meta.label}
-      </span>
-      {error && (
-        <span className="text-[11px] text-slate-500 max-w-[200px] truncate" title={error}>
-          {error}
+    <div className="py-2.5 border-b border-slate-100 last:border-0">
+      <div className="flex items-center gap-3">
+        <Icon
+          size={14}
+          className={clsx(meta.iconCls, status === 'loading' ? 'animate-spin' : '')}
+          aria-hidden="true"
+        />
+        <span className="flex-1 text-[13px] font-medium text-slate-800">{name}</span>
+        <span className={clsx('text-[12px] font-semibold', meta.textCls)}>
+          {meta.label}
         </span>
+        {typeof stored_records === 'number' && stored_records > 0 && (
+          <span className="text-[11px] text-slate-400 tabular-nums">
+            {stored_records.toLocaleString()} stored
+          </span>
+        )}
+      </div>
+      {error && (
+        <p className="ml-[22px] mt-0.5 text-[11px] text-slate-500 max-w-xs" title={error}>
+          {error}
+        </p>
+      )}
+      {(last_successful_sync || last_attempt) && (
+        <div className="ml-[22px] mt-0.5 flex gap-3 text-[11px] text-slate-400">
+          {last_successful_sync && (
+            <span>Last sync: {formatDate(last_successful_sync)}</span>
+          )}
+          {last_attempt && (
+            <span>Checked: {formatDate(last_attempt)}</span>
+          )}
+        </div>
       )}
     </div>
   )
@@ -265,6 +296,9 @@ export function SettingsPage() {
                 name={s.source}
                 status={s.status}
                 error={s.error}
+                stored_records={s.stored_records}
+                last_successful_sync={s.last_successful_sync}
+                last_attempt={s.last_attempt}
               />
             ))}
           </div>

@@ -223,9 +223,13 @@ class EvidenceExplorerItem(EvidenceOut):
 
 class SourceStatusItem(BaseModel):
     source: str
-    status: str          # connected | error | timeout | disabled
+    status: str          # connected | unavailable | error | timeout | disabled | not_configured | rate_limited
     enabled: bool = True
     error: Optional[str] = None
+    # Stored record stats — populated from DB (does not change during outages)
+    stored_records: Optional[int] = None         # live records in DB for this source
+    last_successful_sync: Optional[str] = None   # ISO datetime of last successful ingest
+    last_attempt: Optional[str] = None           # ISO datetime of this connectivity check
 
 
 class SourceRunResult(BaseModel):

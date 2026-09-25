@@ -325,6 +325,9 @@ export interface SourceStatusItem {
   status: 'connected' | 'error' | 'timeout' | 'disabled' | 'loading' | 'not_configured' | 'invalid_key' | 'rate_limited' | 'unavailable'
   enabled: boolean
   error?: string | null
+  stored_records?: number | null
+  last_successful_sync?: string | null
+  last_attempt?: string | null
 }
 
 export interface SourceRunResult {
